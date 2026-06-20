@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-app = FastAPI(title="Monero Mining Dashboard", version="3.0")
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,21 +42,22 @@ miner_status = {
 }
 history = []
 
-# ─── تولید کانفیگ با تنظیمات کم‌مصرف ──────────────────────────────────────────
 def generate_config(wallet_address: str) -> str:
+    """تنظیمات با مصرف رم زیر ۵۱۲ مگابایت"""
     template = {
         "autosave": False,
         "cpu": {
             "enabled": True,
-            "huge-pages": False,           # ← غیرفعال برای کاهش رم
+            "huge-pages": False,          # غیرفعال برای کاهش رم
             "hw-aes": True,
-            "max-threads-hint": 1,          # ← فقط ۱ هسته برای مصرف کم رم
+            "max-threads-hint": 0.5,       # فقط نیم هسته
             "asm": True,
-            "priority": 5
+            "priority": 5,
+            "mode": "light"                # حالت سبک RandomX (256MB)
         },
         "pools": [
             {
-                "url": "pool.supportxmr.com:443",
+                "url": "gulf.moneroocean.stream:10128",  # استخر MoneroOcean
                 "user": wallet_address,
                 "pass": "railway_worker",
                 "tls": True,
@@ -65,13 +66,13 @@ def generate_config(wallet_address: str) -> str:
             }
         ],
         "api": {
-            "port": 8081,                   # ← پورت جدا از وب‌سرویس
+            "port": 8081,
             "access-token": None,
             "worker-id": "railway-miner"
         },
         "http": {
             "enabled": True,
-            "port": 8081,                   # ← پورت جدا
+            "port": 8081,
             "access-token": None,
             "restricted": True
         },
@@ -79,7 +80,7 @@ def generate_config(wallet_address: str) -> str:
         "opencl": False,
         "cuda": False,
         "print-time": 60,
-        "retries": 999,                     # ← تلاش مجدد بالا
+        "retries": 999,
         "retry-pause": 10,
         "health-print-time": 60
     }
@@ -150,7 +151,7 @@ async def wait_for_api():
         except:
             pass
         await asyncio.sleep(1)
-    print("⚠️ API ماینر پس از 30 ثانیه فعال نشد")
+    print("⚠️ API ماینر فعال نشد (مشکل رم)")
 
 async def monitor_miner():
     global miner_process, miner_status
@@ -248,6 +249,7 @@ async def startup():
     asyncio.create_task(periodic_fetch())
     print("🚀 داشبورد ماینینگ راه‌اندازی شد")
     print("📌 برای شروع، آدرس کیف پول مونرو خود را وارد کنید")
+    print("⚡ تنظیمات: حالت light | رم < 512MB")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -258,16 +260,15 @@ async def start_mining(config: WalletConfig):
     if not config.wallet or len(config.wallet.strip()) < 5:
         raise HTTPException(status_code=400, detail="لطفاً آدرس کیف پول را وارد کنید")
     
-    # چک کردن اینکه آدرس مونرو باشد (حدود 95 کاراکتر)
     if len(config.wallet.strip()) < 90:
         return {
             "status": "warning", 
-            "message": "⚠️ این آدرس کوتاه‌تر از آدرس استاندارد مونرو است. مطمئن هستید؟"
+            "message": "⚠️ این آدرس کوتاه‌تر از آدرس استاندارد مونرو است."
         }
     
     try:
         start_miner(config.wallet)
-        return {"status": "ok", "message": f"✅ ماینینگ با کیف پول {config.wallet[:10]}... شروع شد"}
+        return {"status": "ok", "message": f"✅ ماینینگ با {config.wallet[:10]}... شروع شد"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -293,336 +294,124 @@ async def health():
         "uptime": miner_status["uptime"]
     }
 
+# ─── صفحه HTML (ساده و سریع) ─────────────────────────────────────────────────
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⛏️ داشبورد ماینینگ مونرو</title>
+    <title>⛏️ ماینینگ مونرو</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0a0e1a;
-            --card: #12182b;
-            --border: #1e2a45;
-            --primary: #4fc3f7;
-            --success: #4caf50;
-            --danger: #ef5350;
-            --text: #e0e8f0;
-            --text-dim: #6a7fa0;
-            --radius: 14px;
-        }
-        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 20px; direction: rtl; min-height: 100vh; }
-        .container { max-width: 1300px; margin: 0 auto; }
-        .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
-        .header h1 { font-size: 26px; font-weight: 700; color: var(--primary); display: flex; align-items: center; gap: 10px; }
-        .header h1 i { font-size: 28px; }
-        .header-info { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; }
-        .status-badge.online { background: rgba(76, 175, 80, 0.15); color: var(--success); border: 1px solid rgba(76, 175, 80, 0.3); }
-        .status-badge.offline { background: rgba(239, 83, 80, 0.15); color: var(--danger); border: 1px solid rgba(239, 83, 80, 0.3); }
-        .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-        .status-badge .dot.online { background: var(--success); animation: pulse 2s infinite; }
-        .status-badge .dot.offline { background: var(--danger); }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-        .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; margin-bottom: 18px; transition: border-color 0.3s; }
-        .card:hover { border-color: rgba(79, 195, 247, 0.2); }
-        .card-title { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 10px; display: flex; align-items: center; gap: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
-        .wallet-section { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-        .wallet-section input { flex: 1; min-width: 280px; padding: 12px 18px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); font-size: 14px; font-family: monospace; transition: border-color 0.3s; outline: none; }
-        .wallet-section input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79, 195, 247, 0.1); }
-        .wallet-section input::placeholder { color: var(--text-dim); font-family: 'Segoe UI', sans-serif; }
-        .btn { padding: 12px 24px; border-radius: 10px; border: none; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 8px; }
-        .btn-start { background: linear-gradient(135deg, #1b8a3b, #0d6b2a); color: #fff; }
-        .btn-start:hover { transform: translateY(-2px); box-shadow: 0 4px 20px rgba(27, 138, 59, 0.35); }
-        .btn-stop { background: linear-gradient(135deg, #b71c1c, #7f0000); color: #fff; }
-        .btn-stop:hover { transform: translateY(-2px); box-shadow: 0 4px 20px rgba(183, 28, 28, 0.35); }
-        .btn-refresh { background: rgba(79, 195, 247, 0.12); color: var(--primary); border: 1px solid rgba(79, 195, 247, 0.15); }
-        .btn-refresh:hover { background: rgba(79, 195, 247, 0.2); }
-        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 18px; }
-        .metric { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; transition: all 0.3s; }
-        .metric:hover { border-color: rgba(79, 195, 247, 0.25); transform: translateY(-2px); }
-        .metric-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
-        .metric-value { font-size: 28px; font-weight: 700; margin-top: 4px; color: var(--text); }
-        .metric-value .unit { font-size: 14px; font-weight: 400; color: var(--text-dim); margin-right: 4px; }
-        .metric-sub { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
-        .chart-container { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; margin-top: 10px; }
-        .chart-container canvas { width: 100% !important; height: 280px !important; }
-        .error-box { background: rgba(239, 83, 80, 0.08); border: 1px solid rgba(239, 83, 80, 0.2); border-radius: 10px; padding: 12px 16px; margin-top: 12px; color: var(--danger); font-size: 13px; display: none; align-items: center; gap: 10px; }
-        .error-box.show { display: flex; }
-        .footer { text-align: center; color: var(--text-dim); font-size: 12px; padding-top: 20px; border-top: 1px solid var(--border); margin-top: 20px; }
-        .footer a { color: var(--primary); text-decoration: none; }
-        @media (max-width: 640px) { body { padding: 12px; } .header h1 { font-size: 20px; } .metric-value { font-size: 22px; } .wallet-section input { min-width: 160px; } .btn { padding: 10px 16px; font-size: 13px; } }
+        body { font-family: 'Segoe UI', sans-serif; background: #0a0e1a; color: #e0e8f0; padding: 16px; direction: rtl; }
+        .container { max-width: 1100px; margin: auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; border-bottom: 1px solid #1e2a45; padding-bottom: 14px; margin-bottom: 16px; }
+        .header h1 { color: #4fc3f7; font-size: 22px; }
+        .card { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+        .wallet-section { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .wallet-section input { flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 6px; border: 1px solid #1e2a45; background: rgba(255,255,255,0.04); color: #fff; font-size: 13px; }
+        .btn { padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; cursor: pointer; font-size: 13px; }
+        .btn-start { background: #1b8a3b; color: #fff; }
+        .btn-stop { background: #b71c1c; color: #fff; }
+        .btn-refresh { background: rgba(79,195,247,0.12); color: #4fc3f7; border: 1px solid rgba(79,195,247,0.15); }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .metric { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 12px 14px; }
+        .metric-label { font-size: 10px; color: #6a7fa0; }
+        .metric-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+        .chart-container { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 14px; margin-top: 10px; }
+        .chart-container canvas { width: 100% !important; height: 220px !important; }
+        .error-box { background: rgba(239,83,80,0.08); border: 1px solid rgba(239,83,80,0.2); border-radius: 6px; padding: 8px 12px; margin-top: 8px; color: #ef5350; display: none; font-size: 13px; }
+        .error-box.show { display: flex; align-items: center; gap: 6px; }
+        .footer { text-align: center; color: #6a7fa0; font-size: 11px; padding-top: 14px; border-top: 1px solid #1e2a45; margin-top: 14px; }
+        .status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 16px; font-size: 12px; font-weight: 600; }
+        .status-badge.online { background: rgba(76,175,80,0.15); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
+        .status-badge.offline { background: rgba(239,83,80,0.15); color: #ef5350; border: 1px solid rgba(239,83,80,0.3); }
+        .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+        .dot.online { background: #4caf50; animation: pulse 2s infinite; }
+        .dot.offline { background: #ef5350; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        @media (max-width: 500px) { .header h1 { font-size: 17px; } .metric-value { font-size: 17px; } }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
-        <h1><i class="fas fa-microchip"></i> ⛏️ ماینینگ مونرو</h1>
-        <div class="header-info">
-            <span class="status-badge" id="statusBadge">
-                <span class="dot offline" id="statusDot"></span>
-                <span id="statusText">غیرفعال</span>
-            </span>
-            <button class="btn btn-refresh" onclick="fetchAll()">
-                <i class="fas fa-sync"></i> بروزرسانی
-            </button>
+        <h1>⛏️ مونرو</h1>
+        <div>
+            <span class="status-badge" id="statusBadge"><span class="dot offline" id="statusDot"></span><span id="statusText">غیرفعال</span></span>
+            <button class="btn btn-refresh" onclick="fetchAll()">🔄</button>
         </div>
     </div>
     <div class="card">
-        <div class="card-title"><i class="fas fa-wallet"></i> 🔑 کیف پول</div>
         <div class="wallet-section">
-            <input type="text" id="walletInput" 
-                   placeholder="آدرس کیف پول مونرو خود را وارد کنید (حدود 95 کاراکتر)" 
-                   value="48edfHu7V9Z84YzzMa6fUueoELZ9ZRXq9VetWzYGzKt52XU5xvqgzYnDK9URnRoJMk1j8nLwEVsaSWJ4fhdUyZijBGUicoD">
-            <button class="btn btn-start" onclick="startMining()">
-                <i class="fas fa-play"></i> شروع
-            </button>
-            <button class="btn btn-stop" onclick="stopMining()">
-                <i class="fas fa-stop"></i> توقف
-            </button>
+            <input type="text" id="walletInput" placeholder="آدرس مونرو (95 کاراکتر)" value="48edfHu7V9Z84YzzMa6fUueoELZ9ZRXq9VetWzYGzKt52XU5xvqgzYnDK9URnRoJMk1j8nLwEVsaSWJ4fhdUyZijBGUicoD">
+            <button class="btn btn-start" onclick="startMining()">▶ شروع</button>
+            <button class="btn btn-stop" onclick="stopMining()">⏹ توقف</button>
         </div>
-        <div id="statusMsg" style="margin-top:10px;font-size:13px;color:var(--text-dim)"></div>
-        <div class="error-box" id="errorBox">
-            <i class="fas fa-exclamation-circle"></i>
-            <span id="errorText"></span>
-        </div>
+        <div id="statusMsg" style="margin-top:6px;font-size:12px;color:#6a7fa0;"></div>
+        <div class="error-box" id="errorBox"><span id="errorText"></span></div>
     </div>
     <div class="metrics">
-        <div class="metric">
-            <div class="metric-label"><i class="fas fa-tachometer-alt"></i> هش‌ریت</div>
-            <div class="metric-value" id="hashrate">-- <span class="unit">H/s</span></div>
-            <div class="metric-sub">بیشترین: <span id="hashrateHighest">--</span></div>
-        </div>
-        <div class="metric">
-            <div class="metric-label"><i class="fas fa-check-circle"></i> شارهای پذیرفته</div>
-            <div class="metric-value" id="sharesGood">--</div>
-            <div class="metric-sub">کل: <span id="sharesTotal">--</span> | رد: <span id="sharesRejected">--</span></div>
-        </div>
-        <div class="metric">
-            <div class="metric-label"><i class="fas fa-clock"></i> آپتایم</div>
-            <div class="metric-value" id="uptime">--</div>
-            <div class="metric-sub">آخرین بروزرسانی: <span id="lastUpdate">--</span></div>
-        </div>
-        <div class="metric">
-            <div class="metric-label"><i class="fas fa-plug"></i> اتصال</div>
-            <div class="metric-value" id="poolStatus">--</div>
-            <div class="metric-sub" id="poolName">استخر: --</div>
-        </div>
+        <div class="metric"><div class="metric-label">هش‌ریت</div><div class="metric-value" id="hashrate">--</div></div>
+        <div class="metric"><div class="metric-label">شار خوب</div><div class="metric-value" id="sharesGood">--</div></div>
+        <div class="metric"><div class="metric-label">آپتایم</div><div class="metric-value" id="uptime">--</div></div>
+        <div class="metric"><div class="metric-label">اتصال</div><div class="metric-value" id="poolStatus">--</div></div>
     </div>
-    <div class="chart-container">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-            <div class="card-title" style="margin-bottom:0;"><i class="fas fa-chart-line"></i> نمودار هش‌ریت</div>
-            <span style="font-size:11px;color:var(--text-dim);">کیف پول: <span id="walletDisplay" style="font-family:monospace;">--</span></span>
-        </div>
-        <canvas id="chart"></canvas>
-    </div>
-    <div class="footer">
-        <i class="fas fa-bolt"></i> بهینه‌سازی شده برای Railway · 
-        <i class="fas fa-memory"></i> مصرف رم &lt; 1GB · 
-        <i class="fas fa-heart" style="color:var(--danger);"></i> 
-        <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a>
-    </div>
+    <div class="chart-container"><canvas id="chart"></canvas></div>
+    <div class="footer">⚡ رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
 </div>
 <script>
-let chartInstance = null;
-let historyData = [];
-let refreshInterval = null;
-
+let chartInstance = null, historyData = [];
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
-    if (!wallet || wallet.length < 5) {
-        alert('لطفاً آدرس کیف پول خود را وارد کنید');
-        return;
-    }
-    document.getElementById('statusMsg').innerHTML = '🔄 در حال راه‌اندازی ماینر...';
+    if (!wallet || wallet.length < 5) { alert('آدرس را وارد کنید'); return; }
+    document.getElementById('statusMsg').innerHTML = '🔄 راه‌اندازی...';
     document.getElementById('errorBox').classList.remove('show');
-    
     try {
-        const res = await fetch('/api/start-mining', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wallet })
-        });
+        const res = await fetch('/api/start-mining', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wallet }) });
         const data = await res.json();
-        
-        if (res.ok) {
-            document.getElementById('statusMsg').innerHTML = '✅ ' + data.message;
-        } else {
-            document.getElementById('statusMsg').innerHTML = '❌ خطا: ' + data.detail;
-            showError(data.detail);
-        }
-    } catch (e) {
-        document.getElementById('statusMsg').innerHTML = '❌ خطا در ارتباط با سرور';
-        showError(e.message);
-    }
+        if (res.ok) { document.getElementById('statusMsg').innerHTML = '✅ ' + data.message; }
+        else { document.getElementById('statusMsg').innerHTML = '❌ ' + data.detail; showError(data.detail); }
+    } catch(e) { document.getElementById('statusMsg').innerHTML = '❌ خطا'; showError(e.message); }
     fetchAll();
 }
-
 async function stopMining() {
-    document.getElementById('statusMsg').innerHTML = '⏹️ در حال توقف...';
-    try {
-        const res = await fetch('/api/stop-mining', { method: 'POST' });
-        const data = await res.json();
-        document.getElementById('statusMsg').innerHTML = '✅ ' + data.message;
-    } catch (e) {
-        document.getElementById('statusMsg').innerHTML = '❌ خطا در توقف';
-    }
+    document.getElementById('statusMsg').innerHTML = '⏹ توقف...';
+    try { const res = await fetch('/api/stop-mining', { method: 'POST' }); const data = await res.json(); document.getElementById('statusMsg').innerHTML = '✅ ' + data.message; } catch(e) { document.getElementById('statusMsg').innerHTML = '❌ خطا'; }
     fetchAll();
 }
-
 async function fetchStatus() {
-    try {
-        const res = await fetch('/api/miner-status');
-        const data = await res.json();
-        updateUI(data);
-    } catch (e) {
-        console.error('خطا در دریافت وضعیت:', e);
-    }
+    try { const res = await fetch('/api/miner-status'); const data = await res.json(); updateUI(data); } catch(e) { console.error(e); }
 }
-
 async function fetchHistory() {
-    try {
-        const res = await fetch('/api/history');
-        historyData = await res.json();
-        updateChart();
-    } catch (e) {
-        console.error('خطا در دریافت تاریخچه:', e);
-    }
+    try { const res = await fetch('/api/history'); historyData = await res.json(); updateChart(); } catch(e) { console.error(e); }
 }
-
 function updateUI(data) {
-    const hashrate = data.hashrate || 0;
-    document.getElementById('hashrate').innerHTML = 
-        hashrate > 0 ? (hashrate/1e3).toFixed(1) + ' <span class="unit">KH/s</span>' : '-- <span class="unit">H/s</span>';
-    
-    const highest = data.hashrate_highest || 0;
-    document.getElementById('hashrateHighest').textContent = 
-        highest > 0 ? (highest/1e3).toFixed(1) + ' KH/s' : '--';
-    
+    const hr = data.hashrate || 0;
+    document.getElementById('hashrate').textContent = hr > 0 ? (hr/1e3).toFixed(1) + ' KH/s' : '--';
     document.getElementById('sharesGood').textContent = data.shares_good || 0;
-    document.getElementById('sharesTotal').textContent = data.shares_total || 0;
-    document.getElementById('sharesRejected').textContent = data.shares_rejected || 0;
-    
     document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
-    document.getElementById('lastUpdate').textContent = data.last_update ? 
-        new Date(data.last_update * 1000).toLocaleTimeString('fa-IR') : '--';
-    
-    document.getElementById('walletDisplay').textContent = data.wallet ? 
-        data.wallet.slice(0, 12) + '...' : '--';
-    
     document.getElementById('poolStatus').textContent = data.connected ? '🟢 متصل' : '🔴 قطع';
-    document.getElementById('poolName').textContent = data.pool ? 'استخر: ' + data.pool : 'استخر: --';
-    
-    const badge = document.getElementById('statusBadge');
-    const dot = document.getElementById('statusDot');
-    const text = document.getElementById('statusText');
-    
-    if (data.running && data.connected) {
-        badge.className = 'status-badge online';
-        dot.className = 'dot online';
-        text.textContent = '⛏️ در حال استخراج';
-    } else if (data.running) {
-        badge.className = 'status-badge online';
-        dot.className = 'dot online';
-        text.textContent = '🔄 در حال اتصال...';
-    } else {
-        badge.className = 'status-badge offline';
-        dot.className = 'dot offline';
-        text.textContent = '⏹️ غیرفعال';
-    }
-    
-    if (data.error) {
-        showError(data.error);
-    } else {
-        document.getElementById('errorBox').classList.remove('show');
-    }
-    
-    if (data.running && data.hashrate > 0) {
-        historyData.push({ time: new Date().toISOString(), hashrate: data.hashrate });
-        if (historyData.length > 100) historyData.shift();
-        updateChart();
-    }
+    const badge = document.getElementById('statusBadge'), dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
+    if (data.running && data.connected) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '⛏️ فعال'; }
+    else if (data.running) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '🔄 اتصال...'; }
+    else { badge.className = 'status-badge offline'; dot.className = 'dot offline'; text.textContent = '⏹️ غیرفعال'; }
+    if (data.error) { showError(data.error); } else { document.getElementById('errorBox').classList.remove('show'); }
+    if (data.running && data.hashrate > 0) { historyData.push({ time: new Date().toISOString(), hashrate: data.hashrate }); if (historyData.length > 100) historyData.shift(); updateChart(); }
 }
-
-function showError(msg) {
-    const box = document.getElementById('errorBox');
-    document.getElementById('errorText').textContent = msg;
-    box.classList.add('show');
-}
-
-function formatUptime(sec) {
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = sec % 60;
-    return h + 'h ' + m + 'm ' + s + 's';
-}
-
+function showError(msg) { const box = document.getElementById('errorBox'); document.getElementById('errorText').textContent = msg; box.classList.add('show'); }
+function formatUptime(sec) { const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60; return h+'h '+m+'m '+s+'s'; }
 function updateChart() {
-    const labels = historyData.map(p => new Date(p.time).toLocaleTimeString('fa-IR'));
-    const values = historyData.map(p => p.hashrate / 1e3);
-    
+    const labels = historyData.map(p => new Date(p.time).toLocaleTimeString('fa-IR')), values = historyData.map(p => p.hashrate/1e3);
     const ctx = document.getElementById('chart').getContext('2d');
-    
-    if (chartInstance) {
-        chartInstance.data.labels = labels;
-        chartInstance.data.datasets[0].data = values;
-        chartInstance.update('none');
-    } else {
-        chartInstance = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'هش‌ریت (KH/s)',
-                    data: values,
-                    borderColor: '#4fc3f7',
-                    backgroundColor: 'rgba(79, 195, 247, 0.08)',
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 2,
-                    pointBackgroundColor: '#4fc3f7',
-                    borderWidth: 2
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        labels: { color: '#6a7fa0', font: { size: 11 } }
-                    }
-                },
-                scales: {
-                    x: {
-                        ticks: { color: '#6a7fa0', font: { size: 9 }, maxTicksLimit: 15 },
-                        grid: { color: 'rgba(255,255,255,0.03)' }
-                    },
-                    y: {
-                        ticks: { color: '#6a7fa0', font: { size: 9 } },
-                        grid: { color: 'rgba(255,255,255,0.03)' },
-                        beginAtZero: true
-                    }
-                },
-                interaction: {
-                    intersect: false,
-                    mode: 'index'
-                }
-            }
-        });
-    }
+    if (chartInstance) { chartInstance.data.labels = labels; chartInstance.data.datasets[0].data = values; chartInstance.update('none'); }
+    else { chartInstance = new Chart(ctx, { type: 'line', data: { labels, datasets: [{ label: 'هش‌ریت (KH/s)', data: values, borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,0.08)', fill: true, tension: 0.4, pointRadius: 2, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#6a7fa0' } } }, scales: { x: { ticks: { color: '#6a7fa0', maxTicksLimit: 12 } }, y: { ticks: { color: '#6a7fa0' }, beginAtZero: true } } } }); }
 }
-
-async function fetchAll() {
-    await fetchStatus();
-    await fetchHistory();
-}
-
+async function fetchAll() { await fetchStatus(); await fetchHistory(); }
 fetchAll();
-refreshInterval = setInterval(fetchAll, 8000);
+setInterval(fetchAll, 8000);
 </script>
 </body></html>
 """
