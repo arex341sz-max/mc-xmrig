@@ -17,7 +17,7 @@ RUN mkdir build && cd build && \
     cmake .. && \
     make -j$(nproc)
 
-# کپی فایل اجرایی به مسیر سیستم (به جای make install)
+# کپی فایل اجرایی به مسیر سیستم
 RUN cp /xmrig/build/xmrig /usr/local/bin/xmrig && \
     chmod +x /usr/local/bin/xmrig
 
