@@ -1,7 +1,7 @@
-FROM miningcontainers/xmrig:latest
+FROM python:3.11-slim
 
-COPY config.json /xmrig/config.json
+RUN pip install requests psycopg2-binary
 
-EXPOSE 8080
+COPY logger.py .
 
-ENTRYPOINT ["./xmrig"]
+CMD ["python", "logger.py"]
