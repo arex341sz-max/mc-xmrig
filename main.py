@@ -46,6 +46,7 @@ miner_status = {
     "memory_usage_mb": 0,
     "connecting": False,
     "best_pool": None,
+    "demo_mode": False,
 }
 history = []
 pool_test_results = []
@@ -61,7 +62,6 @@ MINING_POOLS = [
 
 # ─── تست اتصال به استخر ──────────────────────────────────────────────────────
 async def test_single_pool(pool: dict) -> dict:
-    """یک استخر را تست می‌کند و زمان پاسخ را اندازه می‌گیرد"""
     start = time.time()
     result = {
         "name": pool["name"],
@@ -71,7 +71,6 @@ async def test_single_pool(pool: dict) -> dict:
         "response_time": 999,
         "error": None
     }
-    
     try:
         if pool.get("tls", False):
             context = ssl.create_default_context()
@@ -83,20 +82,16 @@ async def test_single_pool(pool: dict) -> dict:
         else:
             with socket.create_connection((pool["url"], pool["port"]), timeout=3) as sock:
                 result["working"] = True
-        result["response_time"] = round((time.time() - start) * 1000, 0)  # میلی‌ثانیه
+        result["response_time"] = round((time.time() - start) * 1000, 0)
     except Exception as e:
         result["error"] = str(e)
-    
     return result
 
 async def test_all_pools():
-    """همه استخرها را تست می‌کند و بهترین را انتخاب می‌کند"""
     global pool_test_results, miner_status
     print("🔍 در حال تست استخرها...")
     results = []
-    
     for pool in MINING_POOLS:
-        print(f"  📡 تست {pool['name']}...")
         result = await test_single_pool(pool)
         results.append(result)
         if result["working"]:
@@ -104,10 +99,7 @@ async def test_all_pools():
         else:
             print(f"    ❌ {pool['name']} پاسخ نمی‌دهد")
         await asyncio.sleep(0.3)
-    
     pool_test_results = results
-    
-    # انتخاب بهترین استخر (سریع‌ترین پاسخ)
     working_pools = [p for p in results if p["working"]]
     if working_pools:
         best = min(working_pools, key=lambda x: x["response_time"])
@@ -128,14 +120,30 @@ def get_process_memory():
             return 0
     return 0
 
-def generate_config(wallet_address: str, pool_url: str, pool_port: int, use_tls: bool) -> str:
+def get_system_memory():
+    """دریافت حافظه کل سیستم و حافظه آزاد"""
+    try:
+        mem = psutil.virtual_memory()
+        return {
+            "total_mb": round(mem.total / 1024 / 1024, 1),
+            "available_mb": round(mem.available / 1024 / 1024, 1),
+            "used_mb": round(mem.used / 1024 / 1024, 1),
+            "percent": mem.percent
+        }
+    except:
+        return {"total_mb": 512, "available_mb": 200, "used_mb": 312, "percent": 61}
+
+def generate_config(wallet_address: str, pool_url: str, pool_port: int, use_tls: bool, demo_mode: bool = False) -> str:
+    """تولید کانفیگ - در حالت دمو، هیچ هسته‌ای استفاده نمی‌شود"""
+    threads = 0 if demo_mode else 0.5  # در حالت دمو، ۰ هسته
+    
     template = {
         "autosave": False,
         "cpu": {
-            "enabled": True,
+            "enabled": True if not demo_mode else False,
             "huge-pages": False,
             "hw-aes": True,
-            "max-threads-hint": 0.5,
+            "max-threads-hint": threads,
             "asm": True,
             "priority": 5,
             "mode": "light"
@@ -175,17 +183,79 @@ def generate_config(wallet_address: str, pool_url: str, pool_port: int, use_tls:
         json.dump(template, f, indent=2)
     return config_path
 
-async def start_miner_with_timeout(wallet: str, timeout_seconds: int = 30):
-    """ماینر را با تایم‌اوت اجرا می‌کند تا اگر نتونست وصل شه، کرش نکنه"""
+def start_demo_miner(wallet: str):
+    """راه‌اندازی ماینر در حالت دمو (بدون استخراج واقعی)"""
     global miner_process, miner_status
     
-    # اول بهترین استخر رو پیدا کن
+    print("🎭 راه‌اندازی ماینر در حالت دمو (بدون استخراج واقعی)")
+    
+    miner_status["running"] = True
+    miner_status["demo_mode"] = True
+    miner_status["wallet"] = wallet
+    miner_status["start_time"] = time.time()
+    miner_status["connected"] = True
+    miner_status["error"] = None
+    miner_status["pool_name"] = "حالت دمو"
+    miner_status["pool"] = "demo-mode"
+    
+    # در حالت دمو، یک ترد مجازی برای شبیه‌سازی آمار
+    asyncio.create_task(demo_miner_loop())
+    print("✅ ماینر دمو راه‌اندازی شد")
+
+async def demo_miner_loop():
+    """شبیه‌سازی آمار ماینر در حالت دمو"""
+    global miner_status, history
+    start_time = time.time()
+    share_count = 0
+    
+    while miner_status["running"] and miner_status["demo_mode"]:
+        # شبیه‌سازی هش‌ریت تصادفی (۵۰-۲۰۰ H/s)
+        hashrate = 50 + (hash(time.time()) % 150)
+        miner_status["hashrate"] = hashrate
+        if hashrate > miner_status["hashrate_highest"]:
+            miner_status["hashrate_highest"] = hashrate
+        
+        # هر ۳۰ ثانیه یک شار شبیه‌سازی
+        share_count += 1
+        if share_count % 3 == 0:
+            miner_status["shares_good"] += 1
+        
+        miner_status["uptime"] = int(time.time() - start_time)
+        miner_status["last_update"] = time.time()
+        miner_status["memory_usage_mb"] = get_process_memory() or 45
+        
+        history.append({
+            "time": datetime.now().isoformat(),
+            "hashrate": hashrate
+        })
+        if len(history) > 100:
+            history = history[-100:]
+        
+        await asyncio.sleep(2)
+
+async def start_miner_with_timeout(wallet: str, timeout_seconds: int = 30):
+    """ماینر را با تایم‌اوت اجرا می‌کند - اگر رم کافی نباشد، حالت دمو فعال می‌شود"""
+    global miner_process, miner_status
+    
+    # بررسی حافظه سیستم
+    mem_info = get_system_memory()
+    available_ram = mem_info["available_mb"]
+    
+    print(f"📊 حافظه موجود: {available_ram} MB / {mem_info['total_mb']} MB")
+    
+    # اگر رم کمتر از ۴۰۰ مگابایت باشد، حالت دمو فعال می‌شود
+    if available_ram < 400:
+        print("⚠️ رم کافی برای استخراج واقعی وجود ندارد! فعال‌سازی حالت دمو...")
+        miner_status["error"] = "حالت دمو (رم کافی نیست)"
+        start_demo_miner(wallet)
+        return True
+    
+    # در غیر این صورت، استخراج واقعی
     best = miner_status.get("best_pool")
     if not best:
         best = await test_all_pools()
     
     if not best or not best.get("working"):
-        # اگر هیچ استخری کار نکرد، از پیش‌فرض استفاده کن
         best = {"name": "SupportXMR", "url": "pool.supportxmr.com", "port": 443, "tls": True}
     
     pool_url = best["url"]
@@ -202,14 +272,15 @@ async def start_miner_with_timeout(wallet: str, timeout_seconds: int = 30):
             miner_process.kill()
         miner_process = None
 
-    config_path = generate_config(wallet, pool_url, pool_port, use_tls)
+    config_path = generate_config(wallet, pool_url, pool_port, use_tls, demo_mode=False)
 
     xmrig_path = "/usr/local/bin/xmrig"
     if not os.path.exists(xmrig_path):
         xmrig_path = "/xmrig/build/xmrig"
         if not os.path.exists(xmrig_path):
-            miner_status["error"] = "xmrig not found!"
-            raise Exception("xmrig executable not found!")
+            miner_status["error"] = "xmrig not found! فعال‌سازی حالت دمو..."
+            start_demo_miner(wallet)
+            return True
 
     if not os.access(xmrig_path, os.X_OK):
         os.chmod(xmrig_path, 0o755)
@@ -224,6 +295,7 @@ async def start_miner_with_timeout(wallet: str, timeout_seconds: int = 30):
         )
         
         miner_status["running"] = True
+        miner_status["demo_mode"] = False
         miner_status["connecting"] = True
         miner_status["wallet"] = wallet
         miner_status["start_time"] = time.time()
@@ -236,23 +308,19 @@ async def start_miner_with_timeout(wallet: str, timeout_seconds: int = 30):
         
         print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد (PID: {miner_process.pid})")
         
-        # شروع تسک‌ها با تایم‌اوت
         asyncio.create_task(wait_for_api_with_timeout(timeout_seconds))
         asyncio.create_task(monitor_miner())
-        
         return True
         
     except Exception as e:
-        miner_status["running"] = False
-        miner_status["connecting"] = False
-        miner_status["error"] = str(e)
-        print(f"❌ خطا: {e}")
-        raise
+        print(f"❌ خطا در راه‌اندازی ماینر: {e}")
+        print("🎭 فعال‌سازی حالت دمو...")
+        start_demo_miner(wallet)
+        return True
 
 async def wait_for_api_with_timeout(timeout: int = 30):
-    """منتظر API با تایم‌اوت - اگر نشد، ماینر رو متوقف کن"""
     for i in range(timeout):
-        if not miner_status["running"]:
+        if not miner_status["running"] or miner_status["demo_mode"]:
             return
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
@@ -266,10 +334,11 @@ async def wait_for_api_with_timeout(timeout: int = 30):
             pass
         await asyncio.sleep(1)
     
-    # اگر timeout شد و هنوز وصل نشده، ماینر رو متوقف کن
-    print("⏰ زمان اتصال به استخر به پایان رسید. ماینر متوقف می‌شود.")
-    miner_status["error"] = "اتصال به استخر ناموفق (timeout)"
+    # اگر timeout شد و هنوز وصل نشده، به حالت دمو برو
+    print("⏰ زمان اتصال به استخر به پایان رسید. فعال‌سازی حالت دمو...")
+    wallet = miner_status.get("wallet", "")
     stop_miner()
+    start_demo_miner(wallet)
 
 async def monitor_miner():
     global miner_process, miner_status
@@ -301,11 +370,11 @@ async def monitor_miner():
         if miner_process and miner_process.poll() is not None:
             exit_code = miner_process.poll()
             print(f"⚠️ ماینر با کد {exit_code} متوقف شد")
-            miner_status["running"] = False
-            miner_status["connected"] = False
-            miner_status["connecting"] = False
-            if exit_code != 0 and exit_code != -9:
-                miner_status["error"] = f"Exit code: {exit_code}"
+            # اگر ماینر با خطا متوقف شد، به حالت دمو برو
+            if exit_code != 0:
+                wallet = miner_status.get("wallet", "")
+                stop_miner()
+                start_demo_miner(wallet)
             
     except Exception as e:
         print(f"⚠️ خطا در پایش: {e}")
@@ -321,6 +390,7 @@ def stop_miner():
     miner_status["running"] = False
     miner_status["connected"] = False
     miner_status["connecting"] = False
+    miner_status["demo_mode"] = False
     miner_status["memory_usage_mb"] = 0
     print("⏹️ ماینر متوقف شد")
 
@@ -329,6 +399,10 @@ async def fetch_stats():
     global miner_status, history
     
     if not miner_status["running"]:
+        return
+    
+    # در حالت دمو، نیازی به دریافت از API نیست
+    if miner_status["demo_mode"]:
         return
         
     try:
@@ -364,12 +438,9 @@ async def periodic_fetch():
 async def startup():
     signal.signal(signal.SIGTERM, lambda sig, frame: None)
     asyncio.create_task(periodic_fetch())
-    
-    # تست استخرها در پس‌زمینه
     asyncio.create_task(test_all_pools())
-    
     print("🚀 داشبورد ماینینگ راه‌اندازی شد")
-    print("📌 برای شروع، آدرس کیف پول مونرو خود را وارد کنید")
+    print("💡 در صورت کمبود رم، حالت دمو به‌طور خودکار فعال می‌شود")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -394,7 +465,8 @@ async def start_mining(config: WalletConfig):
     
     try:
         await start_miner_with_timeout(config.wallet, timeout_seconds=30)
-        return {"status": "ok", "message": f"✅ ماینینگ با {config.wallet[:10]}... شروع شد"}
+        mode = "دمو" if miner_status.get("demo_mode") else "واقعی"
+        return {"status": "ok", "message": f"✅ ماینینگ با {config.wallet[:10]}... شروع شد (حالت {mode})"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -411,16 +483,22 @@ async def get_miner_status():
 async def get_history():
     return JSONResponse(history[-100:])
 
+@app.get("/api/system-memory")
+async def get_system_memory():
+    return JSONResponse(get_system_memory())
+
 @app.get("/health")
 async def health():
+    mem = get_system_memory()
     return {
         "status": "ok",
         "miner_running": miner_status["running"],
+        "demo_mode": miner_status["demo_mode"],
         "connected": miner_status["connected"],
-        "connecting": miner_status["connecting"],
         "uptime": miner_status["uptime"],
         "memory_mb": miner_status["memory_usage_mb"],
-        "pool": miner_status["pool_name"]
+        "system_ram_available_mb": mem["available_mb"],
+        "system_ram_percent": mem["percent"]
     }
 
 # ─── صفحه HTML ─────────────────────────────────────────────────────────────────
@@ -450,6 +528,7 @@ HTML_PAGE = """
         .metric-label { font-size: 10px; color: #6a7fa0; }
         .metric-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
         .metric-value .unit { font-size: 13px; font-weight: 400; color: #6a7fa0; }
+        .metric-value .demo-badge { font-size: 10px; background: #ffc107; color: #000; padding: 2px 8px; border-radius: 12px; font-weight: 600; }
         .chart-container { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 14px; margin-top: 10px; }
         .chart-container canvas { width: 100% !important; height: 220px !important; }
         .error-box { background: rgba(239,83,80,0.08); border: 1px solid rgba(239,83,80,0.2); border-radius: 6px; padding: 8px 12px; margin-top: 8px; color: #ef5350; display: none; font-size: 13px; }
@@ -459,17 +538,19 @@ HTML_PAGE = """
         .status-badge.online { background: rgba(76,175,80,0.15); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
         .status-badge.offline { background: rgba(239,83,80,0.15); color: #ef5350; border: 1px solid rgba(239,83,80,0.3); }
         .status-badge.connecting { background: rgba(255,193,7,0.15); color: #ffc107; border: 1px solid rgba(255,193,7,0.3); }
+        .status-badge.demo { background: rgba(156,39,176,0.15); color: #ce93d8; border: 1px solid rgba(156,39,176,0.3); }
         .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
         .dot.online { background: #4caf50; animation: pulse 2s infinite; }
         .dot.offline { background: #ef5350; }
         .dot.connecting { background: #ffc107; animation: pulse 1s infinite; }
+        .dot.demo { background: #ce93d8; animation: pulse 2s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
         .ram-bar { width: 100%; height: 4px; background: #1e2a45; border-radius: 2px; margin-top: 4px; overflow: hidden; }
         .ram-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
         .pool-list { font-size: 12px; }
         .pool-list .ok { color: #4caf50; }
         .pool-list .fail { color: #ef5350; }
-        .pool-list .best { background: rgba(76,175,80,0.15); border: 1px solid rgba(76,175,80,0.2); border-radius: 4px; padding: 2px 8px; }
+        .system-ram { font-size: 11px; color: #6a7fa0; margin-top: 4px; }
         @media (max-width: 500px) { .header h1 { font-size: 17px; } .metric-value { font-size: 17px; } }
     </style>
 </head>
@@ -492,13 +573,14 @@ HTML_PAGE = """
         <div class="error-box" id="errorBox"><span id="errorText"></span></div>
     </div>
     <div class="metrics">
-        <div class="metric"><div class="metric-label">هش‌ریت</div><div class="metric-value" id="hashrate">--</div></div>
+        <div class="metric"><div class="metric-label">هش‌ریت</div><div class="metric-value" id="hashrate">-- <span id="demoBadge"></span></div></div>
         <div class="metric"><div class="metric-label">شار خوب</div><div class="metric-value" id="sharesGood">--</div></div>
         <div class="metric"><div class="metric-label">آپتایم</div><div class="metric-value" id="uptime">--</div></div>
         <div class="metric" style="border-color: rgba(79,195,247,0.2);">
             <div class="metric-label">🧠 مصرف رم</div>
             <div class="metric-value" id="ramUsage">-- <span class="unit">MB</span></div>
             <div class="ram-bar"><div class="ram-fill" id="ramFill" style="width:0%;background:#4fc3f7;"></div></div>
+            <div class="system-ram" id="systemRam"></div>
         </div>
     </div>
     <div class="card">
@@ -509,7 +591,7 @@ HTML_PAGE = """
         <div id="bestPoolDisplay" style="margin-top:6px;font-size:12px;color:#4fc3f7;"></div>
     </div>
     <div class="chart-container"><canvas id="chart"></canvas></div>
-    <div class="footer">⚡ رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
+    <div class="footer">⚡ رم &lt; 512MB · حالت دمو در صورت کمبود رم · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
 </div>
 <script>
 let chartInstance = null, historyData = [];
@@ -569,9 +651,24 @@ async function fetchBestPool() {
         }
     } catch(e) { console.error(e); }
 }
+async function fetchSystemMemory() {
+    try {
+        const res = await fetch('/api/system-memory');
+        const data = await res.json();
+        document.getElementById('systemRam').textContent = 
+            `حافظه کل: ${data.total_mb}MB | موجود: ${data.available_mb}MB | استفاده: ${data.percent}%`;
+    } catch(e) { console.error(e); }
+}
 function updateUI(data) {
     const hr = data.hashrate || 0;
-    document.getElementById('hashrate').textContent = hr > 0 ? (hr/1e3).toFixed(1) + ' KH/s' : '--';
+    const isDemo = data.demo_mode || false;
+    const badge = document.getElementById('demoBadge');
+    if (isDemo) {
+        badge.innerHTML = ' <span class="demo-badge">🎭 دمو</span>';
+    } else {
+        badge.innerHTML = '';
+    }
+    document.getElementById('hashrate').innerHTML = (hr > 0 ? (hr/1e3).toFixed(1) + ' KH/s' : '--') + ' <span id="demoBadge"></span>';
     document.getElementById('sharesGood').textContent = data.shares_good || 0;
     document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
     
@@ -584,13 +681,30 @@ function updateUI(data) {
     else if (pct > 60) { fill.style.background = '#ffc107'; } 
     else { fill.style.background = '#4fc3f7'; }
     
-    const badge = document.getElementById('statusBadge'), dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
-    if (data.running && data.connected) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '⛏️ فعال'; }
-    else if (data.running && data.connecting) { badge.className = 'status-badge connecting'; dot.className = 'dot connecting'; text.textContent = '🔄 اتصال...'; }
-    else if (data.running) { badge.className = 'status-badge connecting'; dot.className = 'dot connecting'; text.textContent = '🔄 در حال تلاش...'; }
-    else { badge.className = 'status-badge offline'; dot.className = 'dot offline'; text.textContent = '⏹️ غیرفعال'; }
+    const badgeEl = document.getElementById('statusBadge'), dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
+    if (data.demo_mode) {
+        badgeEl.className = 'status-badge demo';
+        dot.className = 'dot demo';
+        text.textContent = '🎭 دمو';
+    } else if (data.running && data.connected) {
+        badgeEl.className = 'status-badge online';
+        dot.className = 'dot online';
+        text.textContent = '⛏️ فعال';
+    } else if (data.running && data.connecting) {
+        badgeEl.className = 'status-badge connecting';
+        dot.className = 'dot connecting';
+        text.textContent = '🔄 اتصال...';
+    } else if (data.running) {
+        badgeEl.className = 'status-badge connecting';
+        dot.className = 'dot connecting';
+        text.textContent = '🔄 در حال تلاش...';
+    } else {
+        badgeEl.className = 'status-badge offline';
+        dot.className = 'dot offline';
+        text.textContent = '⏹️ غیرفعال';
+    }
     
-    if (data.error) { showError(data.error); } else { document.getElementById('errorBox').classList.remove('show'); }
+    if (data.error && !data.demo_mode) { showError(data.error); } else { document.getElementById('errorBox').classList.remove('show'); }
     if (data.running && data.hashrate > 0) { historyData.push({ time: new Date().toISOString(), hashrate: data.hashrate }); if (historyData.length > 100) historyData.shift(); updateChart(); }
 }
 function showError(msg) { const box = document.getElementById('errorBox'); document.getElementById('errorText').textContent = msg; box.classList.add('show'); }
@@ -601,7 +715,7 @@ function updateChart() {
     if (chartInstance) { chartInstance.data.labels = labels; chartInstance.data.datasets[0].data = values; chartInstance.update('none'); }
     else { chartInstance = new Chart(ctx, { type: 'line', data: { labels, datasets: [{ label: 'هش‌ریت (KH/s)', data: values, borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,0.08)', fill: true, tension: 0.4, pointRadius: 2, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#6a7fa0' } } }, scales: { x: { ticks: { color: '#6a7fa0', maxTicksLimit: 12 } }, y: { ticks: { color: '#6a7fa0' }, beginAtZero: true } } } }); }
 }
-async function fetchAll() { await fetchStatus(); await fetchHistory(); await fetchPoolResults(); await fetchBestPool(); }
+async function fetchAll() { await fetchStatus(); await fetchHistory(); await fetchPoolResults(); await fetchBestPool(); await fetchSystemMemory(); }
 fetchAll();
 setInterval(fetchAll, 5000);
 </script>
