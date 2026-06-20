@@ -6,8 +6,6 @@ import asyncio
 import httpx
 import signal
 import psutil
-import socket
-import ssl
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -27,17 +25,6 @@ app.add_middleware(
 class WalletConfig(BaseModel):
     wallet: str
 
-# ═══════════════════════════════════════════════════════════════
-# 🌐 لیست کامل استخرهای مونرو (به‌روز و تست‌شده)
-# ═══════════════════════════════════════════════════════════════
-MINING_POOLS = [
-    {"name": "SupportXMR", "url": "pool.supportxmr.com", "ports": [443, 3333, 5555, 7777, 9000], "tls": True},
-    {"name": "MoneroOcean", "url": "gulf.moneroocean.stream", "ports": [10128, 10128], "tls": True},
-    {"name": "Nanopool", "url": "xmr.nanopool.org", "ports": [14433, 14444], "tls": True},
-    {"name": "HashVault", "url": "pool.hashvault.pro", "ports": [443, 3333, 5555, 7777, 9000], "tls": True},
-    {"name": "OMINE", "url": "xmr.omine.ga", "ports": [3000, 5000, 7000, 9000], "tls": True},
-]
-
 miner_process = None
 miner_status = {
     "running": False,
@@ -51,117 +38,26 @@ miner_status = {
     "start_time": None,
     "last_update": None,
     "pool": "",
-    "pool_name": "",
     "error": None,
     "connected": False,
-    "memory_usage_mb": 0,
-    "pool_test_results": [],
-    "best_pool": None,
+    "memory_usage_mb": 0,  # مصرف رم ماینر
 }
 history = []
 
-# ═══════════════════════════════════════════════════════════════
-# 🔍 توابع تست استخرها
-# ═══════════════════════════════════════════════════════════════
-async def test_pool_connection(pool: dict) -> dict:
-    """اتصال به استخر را با تمام پورت‌ها تست می‌کند و بهترین پورت را پیدا می‌کند"""
-    result = {
-        "name": pool["name"],
-        "url": pool["url"],
-        "working": False,
-        "working_ports": [],
-        "best_port": None,
-        "response_time": None,
-        "error": None
-    }
-    
-    for port in pool["ports"]:
-        try:
-            start_time = time.time()
-            
-            if pool.get("tls", False) and port == 443:
-                # تست SSL برای پورت 443
-                context = ssl.create_default_context()
-                with socket.create_connection((pool["url"], port), timeout=5) as sock:
-                    with context.wrap_socket(sock, server_hostname=pool["url"]) as ssock:
-                        response_time = time.time() - start_time
-                        result["working"] = True
-                        result["working_ports"].append(port)
-                        if result["best_port"] is None or response_time < result.get("response_time", 999):
-                            result["best_port"] = port
-                            result["response_time"] = response_time
-            else:
-                # تست معمولی TCP
-                with socket.create_connection((pool["url"], port), timeout=5) as sock:
-                    response_time = time.time() - start_time
-                    result["working"] = True
-                    result["working_ports"].append(port)
-                    if result["best_port"] is None or response_time < result.get("response_time", 999):
-                        result["best_port"] = port
-                        result["response_time"] = response_time
-                        
-        except Exception as e:
-            continue
-    
-    return result
-
-async def test_all_pools():
-    """همه استخرها را تست می‌کند و بهترین را انتخاب می‌کند"""
-    results = []
-    print("🔍 در حال تست اتصال به استخرها...")
-    
-    for pool in MINING_POOLS:
-        print(f"  📡 تست {pool['name']} ({pool['url']})...")
-        result = await test_pool_connection(pool)
-        results.append(result)
-        
-        if result["working"]:
-            print(f"    ✅ {pool['name']} کار می‌کند! پورت: {result['best_port']} (زمان: {result['response_time']:.2f}s)")
-        else:
-            print(f"    ❌ {pool['name']} پاسخ نمی‌دهد")
-    
-    # انتخاب بهترین استخر (کمترین زمان پاسخ)
-    working_pools = [r for r in results if r["working"]]
-    if working_pools:
-        best = min(working_pools, key=lambda x: x.get("response_time", 999))
-        best_pool = {
-            "name": best["name"],
-            "url": best["url"],
-            "port": best["best_port"],
-            "tls": True if best["best_port"] == 443 else False,
-            "response_time": best["response_time"]
-        }
-        miner_status["best_pool"] = best_pool
-        print(f"🏆 بهترین استخر: {best_pool['name']} ({best_pool['url']}:{best_pool['port']})")
-    else:
-        miner_status["best_pool"] = None
-        print("❌ هیچ استخری پاسخ نداد!")
-    
-    miner_status["pool_test_results"] = results
-    return results
-
-# ═══════════════════════════════════════════════════════════════
-# ⚙️ توابع مدیریت ماینر
-# ═══════════════════════════════════════════════════════════════
 def get_process_memory():
+    """دریافت مصرف رم ماینر به مگابایت"""
+    global miner_process
     if miner_process and miner_process.pid:
         try:
             proc = psutil.Process(miner_process.pid)
-            return round(proc.memory_info().rss / 1024 / 1024, 1)
+            mem = proc.memory_info().rss / 1024 / 1024  # تبدیل به مگابایت
+            return round(mem, 1)
         except:
             return 0
     return 0
 
 def generate_config(wallet_address: str) -> str:
-    """تنظیمات با انتخاب بهترین استخر"""
-    best = miner_status.get("best_pool")
-    if best:
-        pool_url = f"{best['url']}:{best['port']}"
-        pool_name = best['name']
-    else:
-        pool_url = "pool.supportxmr.com:443"
-        pool_name = "SupportXMR (پیش‌فرض)"
-    
+    """تنظیمات با مصرف رم زیر ۵۱۲ مگابایت و TLS صحیح"""
     template = {
         "autosave": False,
         "cpu": {
@@ -175,10 +71,10 @@ def generate_config(wallet_address: str) -> str:
         },
         "pools": [
             {
-                "url": pool_url,
+                "url": "pool.supportxmr.com:443",
                 "user": wallet_address,
                 "pass": "railway_worker",
-                "tls": True if best and best.get("tls", False) else False,
+                "tls": True,
                 "keepalive": True,
                 "nicehash": False,
                 "enabled": True
@@ -206,9 +102,6 @@ def generate_config(wallet_address: str) -> str:
     config_path = "/app/config.json"
     with open(config_path, "w") as f:
         json.dump(template, f, indent=2)
-    
-    miner_status["pool"] = pool_url
-    miner_status["pool_name"] = pool_name
     return config_path
 
 def start_miner(wallet: str):
@@ -220,11 +113,6 @@ def start_miner(wallet: str):
         if miner_process.poll() is None:
             miner_process.kill()
         miner_process = None
-
-    # اگر بهترین استخر انتخاب نشده، تست کن
-    if not miner_status.get("best_pool"):
-        asyncio.create_task(test_and_select_best_pool())
-        time.sleep(2)
 
     config_path = generate_config(wallet)
 
@@ -256,8 +144,7 @@ def start_miner(wallet: str):
         miner_status["connected"] = False
         miner_status["memory_usage_mb"] = 0
         
-        print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد")
-        print(f"📍 استخر: {miner_status['pool_name']} ({miner_status['pool']})")
+        print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد (PID: {miner_process.pid})")
         
         asyncio.create_task(wait_for_api())
         asyncio.create_task(monitor_miner())
@@ -267,12 +154,6 @@ def start_miner(wallet: str):
         miner_status["error"] = str(e)
         print(f"❌ خطا: {e}")
         raise
-
-async def test_and_select_best_pool():
-    """تست استخرها و انتخاب بهترین"""
-    results = await test_all_pools()
-    if miner_status.get("best_pool"):
-        print(f"🏆 بهترین استخر انتخاب شد: {miner_status['best_pool']['name']}")
 
 async def wait_for_api():
     for i in range(30):
@@ -309,6 +190,7 @@ async def monitor_miner():
                 elif "connected" in line.lower():
                     miner_status["connected"] = True
                     
+            # به‌روزرسانی مصرف رم
             miner_status["memory_usage_mb"] = get_process_memory()
             await asyncio.sleep(0.1)
         
@@ -357,6 +239,7 @@ async def fetch_stats():
                             
                         miner_status["hashrate"] = hashrate
                         miner_status["shares_total"] = data.get("results", {}).get("shares_total", 0)
+                        miner_status["pool"] = data.get("pool", "")
                         miner_status["uptime"] = int(time.time() - miner_status.get("start_time", time.time()))
                         miner_status["last_update"] = time.time()
                         
@@ -380,17 +263,10 @@ async def periodic_fetch():
         await fetch_stats()
         await asyncio.sleep(5)
 
-# ═══════════════════════════════════════════════════════════════
-# 🚀 رویدادهای شروع و پایان
-# ═══════════════════════════════════════════════════════════════
 @app.on_event("startup")
 async def startup():
     signal.signal(signal.SIGTERM, lambda sig, frame: None)
-    
-    # تست استخرها در پس‌زمینه
-    asyncio.create_task(test_and_select_best_pool())
     asyncio.create_task(periodic_fetch())
-    
     print("🚀 داشبورد ماینینگ راه‌اندازی شد")
     print("📌 برای شروع، آدرس کیف پول مونرو خود را وارد کنید")
 
@@ -398,9 +274,6 @@ async def startup():
 async def shutdown():
     stop_miner()
 
-# ═══════════════════════════════════════════════════════════════
-# 🔌 API Endpointها
-# ═══════════════════════════════════════════════════════════════
 @app.post("/api/start-mining")
 async def start_mining(config: WalletConfig):
     if not config.wallet or len(config.wallet.strip()) < 5:
@@ -431,14 +304,6 @@ async def get_miner_status():
 async def get_history():
     return JSONResponse(history[-100:])
 
-@app.get("/api/pool-test")
-async def get_pool_test_results():
-    return JSONResponse(miner_status.get("pool_test_results", []))
-
-@app.get("/api/best-pool")
-async def get_best_pool():
-    return JSONResponse(miner_status.get("best_pool", None))
-
 @app.get("/health")
 async def health():
     return {
@@ -446,13 +311,10 @@ async def health():
         "miner_running": miner_status["running"],
         "connected": miner_status["connected"],
         "uptime": miner_status["uptime"],
-        "memory_mb": miner_status["memory_usage_mb"],
-        "pool": miner_status.get("pool_name", "N/A")
+        "memory_mb": miner_status["memory_usage_mb"]
     }
 
-# ═══════════════════════════════════════════════════════════════
-# 🖥️ صفحه HTML داشبورد
-# ═══════════════════════════════════════════════════════════════
+# ─── صفحه HTML ─────────────────────────────────────────────────────────────────
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -468,14 +330,13 @@ HTML_PAGE = """
         .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; border-bottom: 1px solid #1e2a45; padding-bottom: 14px; margin-bottom: 16px; }
         .header h1 { color: #4fc3f7; font-size: 22px; }
         .card { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
-        .card-title { font-size: 13px; color: #6a7fa0; margin-bottom: 8px; font-weight: 600; }
         .wallet-section { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
         .wallet-section input { flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 6px; border: 1px solid #1e2a45; background: rgba(255,255,255,0.04); color: #fff; font-size: 13px; }
         .btn { padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; cursor: pointer; font-size: 13px; }
         .btn-start { background: #1b8a3b; color: #fff; }
         .btn-stop { background: #b71c1c; color: #fff; }
         .btn-refresh { background: rgba(79,195,247,0.12); color: #4fc3f7; border: 1px solid rgba(79,195,247,0.15); }
-        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
         .metric { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 12px 14px; }
         .metric-label { font-size: 10px; color: #6a7fa0; }
         .metric-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
@@ -489,22 +350,15 @@ HTML_PAGE = """
         .status-badge.online { background: rgba(76,175,80,0.15); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
         .status-badge.offline { background: rgba(239,83,80,0.15); color: #ef5350; border: 1px solid rgba(239,83,80,0.3); }
         .status-badge.connecting { background: rgba(255,193,7,0.15); color: #ffc107; border: 1px solid rgba(255,193,7,0.3); }
-        .status-badge.best { background: rgba(79,195,247,0.15); color: #4fc3f7; border: 1px solid rgba(79,195,247,0.3); }
         .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
         .dot.online { background: #4caf50; animation: pulse 2s infinite; }
         .dot.offline { background: #ef5350; }
         .dot.connecting { background: #ffc107; animation: pulse 1s infinite; }
-        .dot.best { background: #4fc3f7; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
         .ram-bar { width: 100%; height: 4px; background: #1e2a45; border-radius: 2px; margin-top: 4px; overflow: hidden; }
         .ram-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
-        .pool-item { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #1a1f35; font-size: 12px; }
-        .pool-item:last-child { border-bottom: none; }
-        .pool-status { font-weight: 600; }
-        .pool-status.ok { color: #4caf50; }
-        .pool-status.fail { color: #ef5350; }
-        .pool-status.best { color: #4fc3f7; }
-        .best-pool-badge { background: rgba(79,195,247,0.15); color: #4fc3f7; padding: 2px 8px; border-radius: 12px; font-size: 10px; }
+        .ram-warning { color: #ffc107; }
+        .ram-danger { color: #ef5350; }
         @media (max-width: 500px) { .header h1 { font-size: 17px; } .metric-value { font-size: 17px; } }
     </style>
 </head>
@@ -517,7 +371,6 @@ HTML_PAGE = """
             <button class="btn btn-refresh" onclick="fetchAll()">🔄</button>
         </div>
     </div>
-    
     <div class="card">
         <div class="wallet-section">
             <input type="text" id="walletInput" placeholder="آدرس مونرو (95 کاراکتر)" value="48edfHu7V9Z84YzzMa6fUueoELZ9ZRXq9VetWzYGzKt52XU5xvqgzYnDK9URnRoJMk1j8nLwEVsaSWJ4fhdUyZijBGUicoD">
@@ -527,7 +380,6 @@ HTML_PAGE = """
         <div id="statusMsg" style="margin-top:6px;font-size:12px;color:#6a7fa0;"></div>
         <div class="error-box" id="errorBox"><span id="errorText"></span></div>
     </div>
-
     <div class="metrics">
         <div class="metric"><div class="metric-label">هش‌ریت</div><div class="metric-value" id="hashrate">--</div></div>
         <div class="metric"><div class="metric-label">شار خوب</div><div class="metric-value" id="sharesGood">--</div></div>
@@ -538,23 +390,11 @@ HTML_PAGE = """
             <div class="ram-bar"><div class="ram-fill" id="ramFill" style="width:0%;background:#4fc3f7;"></div></div>
         </div>
     </div>
-
-    <div class="card">
-        <div class="card-title">🏆 بهترین استخر <span id="bestPoolName" style="color:#4fc3f7;font-weight:700;"></span></div>
-        <div id="bestPoolInfo" style="font-size:13px;color:#6a7fa0;">در حال تست...</div>
-    </div>
-
-    <div class="card">
-        <div class="card-title">🌐 نتایج تست استخرها</div>
-        <div id="poolTestResults"><span style="color:#6a7fa0;">⏳ در حال تست...</span></div>
-    </div>
-
     <div class="chart-container"><canvas id="chart"></canvas></div>
     <div class="footer">⚡ رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
 </div>
 <script>
 let chartInstance = null, historyData = [];
-
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
     if (!wallet || wallet.length < 5) { alert('آدرس را وارد کنید'); return; }
@@ -568,60 +408,24 @@ async function startMining() {
     } catch(e) { document.getElementById('statusMsg').innerHTML = '❌ خطا'; showError(e.message); }
     fetchAll();
 }
-
 async function stopMining() {
     document.getElementById('statusMsg').innerHTML = '⏹ توقف...';
     try { const res = await fetch('/api/stop-mining', { method: 'POST' }); const data = await res.json(); document.getElementById('statusMsg').innerHTML = '✅ ' + data.message; } catch(e) { document.getElementById('statusMsg').innerHTML = '❌ خطا'; }
     fetchAll();
 }
-
 async function fetchStatus() {
     try { const res = await fetch('/api/miner-status'); const data = await res.json(); updateUI(data); } catch(e) { console.error(e); }
 }
-
 async function fetchHistory() {
     try { const res = await fetch('/api/history'); historyData = await res.json(); updateChart(); } catch(e) { console.error(e); }
 }
-
-async function fetchPoolTestResults() {
-    try {
-        const res = await fetch('/api/pool-test');
-        const data = await res.json();
-        const container = document.getElementById('poolTestResults');
-        if (!data || data.length === 0) { container.innerHTML = '<span style="color:#6a7fa0;">⏳ در حال تست...</span>'; return; }
-        let html = '';
-        let workingCount = 0;
-        for (const pool of data) {
-            if (pool.working) workingCount++;
-            const status = pool.working ? '✅' : '❌';
-            const cls = pool.working ? 'ok' : 'fail';
-            const portInfo = pool.working ? `پورت: ${pool.best_port} (${pool.response_time?.toFixed(2) || '?'}s)` : 'بدون پاسخ';
-            const bestTag = pool.working && pool === data.find(p => p.working && p.name === document.getElementById('bestPoolName')?.textContent?.trim()) ? ' <span class="best-pool-badge">🏆 بهترین</span>' : '';
-            html += `<div class="pool-item"><span>${status} <strong>${pool.name}</strong> (${pool.url})</span><span class="pool-status ${cls}">${portInfo}${bestTag}</span></div>`;
-        }
-        container.innerHTML = html;
-        const best = document.getElementById('bestPoolName');
-        const bestInfo = document.getElementById('bestPoolInfo');
-        try {
-            const res2 = await fetch('/api/best-pool');
-            const bestData = await res2.json();
-            if (bestData && bestData.name) {
-                best.textContent = `${bestData.name} (${bestData.url}:${bestData.port})`;
-                bestInfo.textContent = `⏱️ زمان پاسخ: ${bestData.response_time?.toFixed(2) || '?'} ثانیه`;
-            } else {
-                best.textContent = 'هیچ استخری در دسترس نیست';
-                bestInfo.textContent = 'لطفاً اتصال اینترنت را بررسی کنید';
-            }
-        } catch(e) { best.textContent = 'خطا در دریافت'; }
-    } catch(e) { console.error(e); }
-}
-
 function updateUI(data) {
     const hr = data.hashrate || 0;
     document.getElementById('hashrate').textContent = hr > 0 ? (hr/1e3).toFixed(1) + ' KH/s' : '--';
     document.getElementById('sharesGood').textContent = data.shares_good || 0;
     document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
     
+    // مصرف رم
     const ram = data.memory_usage_mb || 0;
     document.getElementById('ramUsage').innerHTML = ram > 0 ? ram + ' <span class="unit">MB</span>' : '-- <span class="unit">MB</span>';
     const pct = Math.min(100, (ram / 512) * 100);
@@ -631,6 +435,7 @@ function updateUI(data) {
     else if (pct > 60) { fill.style.background = '#ffc107'; } 
     else { fill.style.background = '#4fc3f7'; }
     
+    // وضعیت
     const badge = document.getElementById('statusBadge'), dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
     if (data.running && data.connected) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '⛏️ فعال'; }
     else if (data.running) { badge.className = 'status-badge connecting'; dot.className = 'dot connecting'; text.textContent = '🔄 اتصال...'; }
@@ -639,24 +444,17 @@ function updateUI(data) {
     if (data.error) { showError(data.error); } else { document.getElementById('errorBox').classList.remove('show'); }
     if (data.running && data.hashrate > 0) { historyData.push({ time: new Date().toISOString(), hashrate: data.hashrate }); if (historyData.length > 100) historyData.shift(); updateChart(); }
 }
-
 function showError(msg) { const box = document.getElementById('errorBox'); document.getElementById('errorText').textContent = msg; box.classList.add('show'); }
 function formatUptime(sec) { const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60; return h+'h '+m+'m '+s+'s'; }
-
 function updateChart() {
     const labels = historyData.map(p => new Date(p.time).toLocaleTimeString('fa-IR')), values = historyData.map(p => p.hashrate/1e3);
     const ctx = document.getElementById('chart').getContext('2d');
     if (chartInstance) { chartInstance.data.labels = labels; chartInstance.data.datasets[0].data = values; chartInstance.update('none'); }
     else { chartInstance = new Chart(ctx, { type: 'line', data: { labels, datasets: [{ label: 'هش‌ریت (KH/s)', data: values, borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,0.08)', fill: true, tension: 0.4, pointRadius: 2, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#6a7fa0' } } }, scales: { x: { ticks: { color: '#6a7fa0', maxTicksLimit: 12 } }, y: { ticks: { color: '#6a7fa0' }, beginAtZero: true } } } }); }
 }
-
-async function fetchAll() {
-    await fetchStatus();
-    await fetchHistory();
-    await fetchPoolTestResults();
-}
+async function fetchAll() { await fetchStatus(); await fetchHistory(); }
 fetchAll();
-setInterval(fetchAll, 5000);
+setInterval(fetchAll, 4000);
 </script>
 </body></html>
 """
