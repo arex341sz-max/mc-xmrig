@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# نصب وابستگی‌های سیستمی و XMRig
+# نصب وابستگی‌های سیستمی
 RUN apt-get update && apt-get install -y \
     git \
     build-essential \
@@ -15,8 +15,11 @@ RUN git clone https://github.com/xmrig/xmrig.git /xmrig
 WORKDIR /xmrig
 RUN mkdir build && cd build && \
     cmake .. && \
-    make -j$(nproc) && \
-    make install
+    make -j$(nproc)
+
+# کپی فایل اجرایی به مسیر سیستم (به جای make install)
+RUN cp /xmrig/build/xmrig /usr/local/bin/xmrig && \
+    chmod +x /usr/local/bin/xmrig
 
 # کپی کد پایتون
 WORKDIR /app
