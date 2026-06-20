@@ -83,14 +83,8 @@ def start_miner(wallet: str):
     # تولید کانفیگ جدید
     config_path = generate_config(wallet)
 
-    # اجرای ماینر با subprocess
-    # فرض می‌کنیم xmrig در مسیر /usr/local/bin/xmrig نصب است
-    # یا اگر در Docker از image miningcontainers/xmrig استفاده می‌کنیم، مسیر /xmrig/xmrig است.
-    xmrig_path = "/xmrig/xmrig"  # مسیر پیش‌فرض در image miningcontainers/xmrig
-    if not os.path.exists(xmrig_path):
-        # اگر در image ما نصب نشده، از مسیر دیگری استفاده کن
-        xmrig_path = "/usr/local/bin/xmrig"
-
+    # مسیر فایل اجرایی XMRig (که در Dockerfile به /usr/local/bin کپی شده)
+    xmrig_path = "/usr/local/bin/xmrig"
     if not os.path.exists(xmrig_path):
         raise Exception("xmrig executable not found!")
 
@@ -140,8 +134,6 @@ async def periodic_fetch():
 
 @app.on_event("startup")
 async def startup():
-    # اگر قبلاً کیف پولی ذخیره شده، آن را بازیابی کن
-    # (اختیاری: از فایل state.json بخوان)
     asyncio.create_task(periodic_fetch())
     print("🚀 داشبورد ماینینگ راه‌اندازی شد")
 
@@ -161,7 +153,6 @@ async def start_mining(config: WalletConfig):
         return {"status": "ok", "message": f"ماینینگ با کیف پول {config.wallet[:8]}... شروع شد"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
 
 @app.post("/api/stop-mining")
 async def stop_mining():
@@ -243,8 +234,9 @@ let historyData = [];
 
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
-    if (!wallet || wallet.length < 50) {
-        alert('لطفاً آدرس کیف پول معتبر وارد کنید');
+    // اصلاح شرط: به جای ۵۰، فقط ۵ کاراکتر چک می‌شود
+    if (!wallet || wallet.length < 5) {
+        alert('لطفاً آدرس کیف پول خود را وارد کنید');
         return;
     }
     document.getElementById('statusMsg').innerHTML = '🔄 در حال راه‌اندازی ماینر...';
@@ -293,10 +285,8 @@ async function fetchStatus() {
         } else {
             statusText.innerHTML = '<span class="status-dot dot-red"></span> غیرفعال';
         }
-        // pool status (mock)
         document.getElementById('poolStatus').textContent = data.running ? 'متصل' : 'قطع';
         document.getElementById('poolName').textContent = data.running ? 'pool.supportxmr.com' : '--';
-        // اضافه کردن به تاریخچه برای نمودار
         if (data.running && data.hashrate > 0) {
             historyData.push({time: new Date(), hashrate: data.hashrate});
             if (historyData.length > 100) historyData.shift();
@@ -349,9 +339,8 @@ function updateChart() {
     }
 }
 
-// بارگذاری اولیه و تایمر
 fetchStatus();
-setInterval(fetchStatus, 10000); // هر ۱۰ ثانیه
+setInterval(fetchStatus, 10000);
 </script>
 </body>
 </html>
