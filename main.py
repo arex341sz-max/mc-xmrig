@@ -5,7 +5,7 @@ import time
 import asyncio
 import httpx
 import signal
-import psutil  # ← کتابخانه جدید برای گرفتن رم
+import psutil
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -40,23 +40,24 @@ miner_status = {
     "pool": "",
     "error": None,
     "connected": False,
-    "memory_mb": 0,  # ← مقدار رم مصرفی ماینر
+    "memory_usage_mb": 0,  # مصرف رم ماینر
 }
 history = []
 
-def get_miner_memory():
-    """دریافت مصرف رم فرآیند ماینر (بر حسب مگابایت)"""
+def get_process_memory():
+    """دریافت مصرف رم ماینر به مگابایت"""
     global miner_process
-    if not miner_process or miner_process.poll() is not None:
-        return 0
-    try:
-        p = psutil.Process(miner_process.pid)
-        mem_mb = p.memory_info().rss / (1024 * 1024)
-        return round(mem_mb, 1)
-    except:
-        return 0
+    if miner_process and miner_process.pid:
+        try:
+            proc = psutil.Process(miner_process.pid)
+            mem = proc.memory_info().rss / 1024 / 1024  # تبدیل به مگابایت
+            return round(mem, 1)
+        except:
+            return 0
+    return 0
 
 def generate_config(wallet_address: str) -> str:
+    """تنظیمات با مصرف رم زیر ۵۱۲ مگابایت و TLS صحیح"""
     template = {
         "autosave": False,
         "cpu": {
@@ -70,12 +71,13 @@ def generate_config(wallet_address: str) -> str:
         },
         "pools": [
             {
-                "url": "gulf.moneroocean.stream:10128",
+                "url": "pool.supportxmr.com:443",
                 "user": wallet_address,
                 "pass": "railway_worker",
                 "tls": True,
                 "keepalive": True,
-                "nicehash": False
+                "nicehash": False,
+                "enabled": True
             }
         ],
         "api": {
@@ -140,7 +142,7 @@ def start_miner(wallet: str):
         miner_status["hashrate"] = 0
         miner_status["shares_good"] = 0
         miner_status["connected"] = False
-        miner_status["memory_mb"] = 0
+        miner_status["memory_usage_mb"] = 0
         
         print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد (PID: {miner_process.pid})")
         
@@ -165,7 +167,7 @@ async def wait_for_api():
         except:
             pass
         await asyncio.sleep(1)
-    print("⚠️ API ماینر فعال نشد (مشکل رم)")
+    print("⚠️ API ماینر فعال نشد")
 
 async def monitor_miner():
     global miner_process, miner_status
@@ -188,6 +190,8 @@ async def monitor_miner():
                 elif "connected" in line.lower():
                     miner_status["connected"] = True
                     
+            # به‌روزرسانی مصرف رم
+            miner_status["memory_usage_mb"] = get_process_memory()
             await asyncio.sleep(0.1)
         
         if miner_process and miner_process.poll() is not None:
@@ -195,6 +199,7 @@ async def monitor_miner():
             print(f"⚠️ ماینر با کد {exit_code} متوقف شد")
             miner_status["running"] = False
             miner_status["connected"] = False
+            miner_status["memory_usage_mb"] = 0
             if exit_code != 0:
                 miner_status["error"] = f"Exit code: {exit_code}"
             
@@ -211,6 +216,7 @@ def stop_miner():
         miner_process = None
     miner_status["running"] = False
     miner_status["connected"] = False
+    miner_status["memory_usage_mb"] = 0
     print("⏹️ ماینر متوقف شد")
 
 async def fetch_stats():
@@ -218,9 +224,6 @@ async def fetch_stats():
     
     if not miner_status["running"]:
         return
-    
-    # دریافت مصرف رم ماینر
-    miner_status["memory_mb"] = get_miner_memory()
         
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -247,7 +250,7 @@ async def fetch_stats():
                         if len(history) > 100:
                             history = history[-100:]
                         
-                        print(f"📊 هش: {hashrate/1e3:.0f} H/s | شار خوب: {miner_status['shares_good']} | رم: {miner_status['memory_mb']} MB")
+                        print(f"📊 هش: {hashrate/1e3:.0f} H/s | رم: {miner_status['memory_usage_mb']} MB")
                         return
                 except:
                     continue
@@ -258,7 +261,7 @@ async def fetch_stats():
 async def periodic_fetch():
     while True:
         await fetch_stats()
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
 
 @app.on_event("startup")
 async def startup():
@@ -266,7 +269,6 @@ async def startup():
     asyncio.create_task(periodic_fetch())
     print("🚀 داشبورد ماینینگ راه‌اندازی شد")
     print("📌 برای شروع، آدرس کیف پول مونرو خود را وارد کنید")
-    print("⚡ تنظیمات: حالت light | رم < 512MB")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -309,10 +311,10 @@ async def health():
         "miner_running": miner_status["running"],
         "connected": miner_status["connected"],
         "uptime": miner_status["uptime"],
-        "memory_mb": miner_status["memory_mb"]
+        "memory_mb": miner_status["memory_usage_mb"]
     }
 
-# ─── صفحه HTML (با کارت رم جدید) ────────────────────────────────────────────
+# ─── صفحه HTML ─────────────────────────────────────────────────────────────────
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -334,12 +336,11 @@ HTML_PAGE = """
         .btn-start { background: #1b8a3b; color: #fff; }
         .btn-stop { background: #b71c1c; color: #fff; }
         .btn-refresh { background: rgba(79,195,247,0.12); color: #4fc3f7; border: 1px solid rgba(79,195,247,0.15); }
-        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
         .metric { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 12px 14px; }
         .metric-label { font-size: 10px; color: #6a7fa0; }
         .metric-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
-        .metric-value .unit { font-size: 12px; font-weight: 400; color: #6a7fa0; margin-right: 2px; }
-        .metric-sub { font-size: 10px; color: #6a7fa0; margin-top: 2px; }
+        .metric-value .unit { font-size: 13px; font-weight: 400; color: #6a7fa0; }
         .chart-container { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 14px; margin-top: 10px; }
         .chart-container canvas { width: 100% !important; height: 220px !important; }
         .error-box { background: rgba(239,83,80,0.08); border: 1px solid rgba(239,83,80,0.2); border-radius: 6px; padding: 8px 12px; margin-top: 8px; color: #ef5350; display: none; font-size: 13px; }
@@ -348,10 +349,16 @@ HTML_PAGE = """
         .status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 16px; font-size: 12px; font-weight: 600; }
         .status-badge.online { background: rgba(76,175,80,0.15); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
         .status-badge.offline { background: rgba(239,83,80,0.15); color: #ef5350; border: 1px solid rgba(239,83,80,0.3); }
+        .status-badge.connecting { background: rgba(255,193,7,0.15); color: #ffc107; border: 1px solid rgba(255,193,7,0.3); }
         .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
         .dot.online { background: #4caf50; animation: pulse 2s infinite; }
         .dot.offline { background: #ef5350; }
+        .dot.connecting { background: #ffc107; animation: pulse 1s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .ram-bar { width: 100%; height: 4px; background: #1e2a45; border-radius: 2px; margin-top: 4px; overflow: hidden; }
+        .ram-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+        .ram-warning { color: #ffc107; }
+        .ram-danger { color: #ef5350; }
         @media (max-width: 500px) { .header h1 { font-size: 17px; } .metric-value { font-size: 17px; } }
     </style>
 </head>
@@ -374,19 +381,20 @@ HTML_PAGE = """
         <div class="error-box" id="errorBox"><span id="errorText"></span></div>
     </div>
     <div class="metrics">
-        <div class="metric"><div class="metric-label">⚡ هش‌ریت</div><div class="metric-value" id="hashrate">--</div></div>
-        <div class="metric"><div class="metric-label">✅ شار خوب</div><div class="metric-value" id="sharesGood">--</div></div>
-        <div class="metric"><div class="metric-label">🕒 آپتایم</div><div class="metric-value" id="uptime">--</div></div>
-        <div class="metric"><div class="metric-label">🔗 اتصال</div><div class="metric-value" id="poolStatus">--</div></div>
-        <div class="metric"><div class="metric-label">🧠 مصرف رم</div><div class="metric-value" id="memoryUsage">-- <span class="unit">MB</span></div><div class="metric-sub">حداکثر: <span id="memoryMax">--</span></div></div>
+        <div class="metric"><div class="metric-label">هش‌ریت</div><div class="metric-value" id="hashrate">--</div></div>
+        <div class="metric"><div class="metric-label">شار خوب</div><div class="metric-value" id="sharesGood">--</div></div>
+        <div class="metric"><div class="metric-label">آپتایم</div><div class="metric-value" id="uptime">--</div></div>
+        <div class="metric" style="border-color: rgba(79,195,247,0.2);">
+            <div class="metric-label">🧠 مصرف رم</div>
+            <div class="metric-value" id="ramUsage">-- <span class="unit">MB</span></div>
+            <div class="ram-bar"><div class="ram-fill" id="ramFill" style="width:0%;background:#4fc3f7;"></div></div>
+        </div>
     </div>
     <div class="chart-container"><canvas id="chart"></canvas></div>
-    <div class="footer">⚡ حالت light · رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
+    <div class="footer">⚡ رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
 </div>
 <script>
 let chartInstance = null, historyData = [];
-let maxMemory = 0;
-
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
     if (!wallet || wallet.length < 5) { alert('آدرس را وارد کنید'); return; }
@@ -416,20 +424,23 @@ function updateUI(data) {
     document.getElementById('hashrate').textContent = hr > 0 ? (hr/1e3).toFixed(1) + ' KH/s' : '--';
     document.getElementById('sharesGood').textContent = data.shares_good || 0;
     document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
-    document.getElementById('poolStatus').textContent = data.connected ? '🟢 متصل' : '🔴 قطع';
     
-    // نمایش مصرف رم
-    const mem = data.memory_mb || 0;
-    document.getElementById('memoryUsage').innerHTML = mem.toFixed(1) + ' <span class="unit">MB</span>';
-    if (mem > maxMemory) {
-        maxMemory = mem;
-        document.getElementById('memoryMax').textContent = maxMemory.toFixed(1) + ' MB';
-    }
+    // مصرف رم
+    const ram = data.memory_usage_mb || 0;
+    document.getElementById('ramUsage').innerHTML = ram > 0 ? ram + ' <span class="unit">MB</span>' : '-- <span class="unit">MB</span>';
+    const pct = Math.min(100, (ram / 512) * 100);
+    const fill = document.getElementById('ramFill');
+    fill.style.width = pct + '%';
+    if (pct > 80) { fill.style.background = '#ef5350'; } 
+    else if (pct > 60) { fill.style.background = '#ffc107'; } 
+    else { fill.style.background = '#4fc3f7'; }
     
+    // وضعیت
     const badge = document.getElementById('statusBadge'), dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
     if (data.running && data.connected) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '⛏️ فعال'; }
-    else if (data.running) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '🔄 اتصال...'; }
+    else if (data.running) { badge.className = 'status-badge connecting'; dot.className = 'dot connecting'; text.textContent = '🔄 اتصال...'; }
     else { badge.className = 'status-badge offline'; dot.className = 'dot offline'; text.textContent = '⏹️ غیرفعال'; }
+    
     if (data.error) { showError(data.error); } else { document.getElementById('errorBox').classList.remove('show'); }
     if (data.running && data.hashrate > 0) { historyData.push({ time: new Date().toISOString(), hashrate: data.hashrate }); if (historyData.length > 100) historyData.shift(); updateChart(); }
 }
@@ -443,7 +454,7 @@ function updateChart() {
 }
 async function fetchAll() { await fetchStatus(); await fetchHistory(); }
 fetchAll();
-setInterval(fetchAll, 8000);
+setInterval(fetchAll, 4000);
 </script>
 </body></html>
 """
