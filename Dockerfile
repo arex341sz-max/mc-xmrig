@@ -1,18 +1,23 @@
 FROM python:3.11-slim
 
-# نصب وابستگی‌های حداقلی
+# نصب وابستگی‌های سیستمی
 RUN apt-get update && apt-get install -y \
-    git build-essential cmake libuv1-dev libssl-dev libhwloc-dev \
+    git \
+    build-essential \
+    cmake \
+    libuv1-dev \
+    libssl-dev \
+    libhwloc-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# کلون و کامپایل XMRig با حداقل تنظیمات
+# کلون و کامپایل XMRig
 RUN git clone https://github.com/xmrig/xmrig.git /xmrig
 WORKDIR /xmrig
 RUN mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_OPENCL=OFF -DWITH_CUDA=OFF && \
     make -j2
 
-# کپی فایل اجرایی
+# کپی فایل اجرایی به مسیر سیستم
 RUN cp /xmrig/build/xmrig /usr/local/bin/xmrig && \
     chmod +x /usr/local/bin/xmrig
 
