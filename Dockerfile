@@ -1,16 +1,7 @@
-FROM  alpine:3
+FROM miningcontainers/xmrig:latest
 
-RUN apk add --no-cache git make cmake libstdc++ gcc g++ libuv-dev openssl-dev hwloc-dev
+# کانفیگ را به مسیر درست داخل کانتینر کپی می‌کنیم
+COPY config.json /xmrig/config.json
 
-RUN git clone https://github.com/xmrig/xmrig
-
-RUN mkdir xmrig/build && cd xmrig/build && \
-    cmake .. && \
-    make -j$(nproc) && \
-    chmod +x xmrig && \
-    rm -r /xmrig/src
-
-COPY config.json /xmrig/build/config.json
-
-WORKDIR /xmrig/build
+# دستور اجرا: خود xmrig فایل config.json را به‌صورت خودکار پیدا می‌کند
 ENTRYPOINT ["./xmrig"]
