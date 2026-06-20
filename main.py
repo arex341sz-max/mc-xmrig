@@ -12,8 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-# ─── راه‌اندازی اپلیکیشن ──────────────────────────────────────────────────────
-app = FastAPI(title="Monero Mining Dashboard", version="2.0")
+app = FastAPI(title="Monero Mining Dashboard", version="3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,11 +21,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── مدل داده ──────────────────────────────────────────────────────────────────
 class WalletConfig(BaseModel):
     wallet: str
 
-# ─── وضعیت ماینر ──────────────────────────────────────────────────────────────
 miner_process = None
 miner_status = {
     "running": False,
@@ -43,18 +40,17 @@ miner_status = {
     "error": None,
     "connected": False,
 }
-history = []  # برای نمودار
+history = []
 
-# ─── توابع مدیریت ماینر ──────────────────────────────────────────────────────
+# ─── تولید کانفیگ با تنظیمات کم‌مصرف ──────────────────────────────────────────
 def generate_config(wallet_address: str) -> str:
-    """تولید فایل config.json با تنظیمات بهینه برای Railway"""
     template = {
         "autosave": False,
         "cpu": {
             "enabled": True,
-            "huge-pages": False,
+            "huge-pages": False,           # ← غیرفعال برای کاهش رم
             "hw-aes": True,
-            "max-threads-hint": 1,
+            "max-threads-hint": 1,          # ← فقط ۱ هسته برای مصرف کم رم
             "asm": True,
             "priority": 5
         },
@@ -69,14 +65,13 @@ def generate_config(wallet_address: str) -> str:
             }
         ],
         "api": {
-            "port": 8080,
+            "port": 8081,                   # ← پورت جدا از وب‌سرویس
             "access-token": None,
-            "worker-id": "railway-miner",
-            "ipv6": False
+            "worker-id": "railway-miner"
         },
         "http": {
             "enabled": True,
-            "port": 8080,
+            "port": 8081,                   # ← پورت جدا
             "access-token": None,
             "restricted": True
         },
@@ -84,7 +79,7 @@ def generate_config(wallet_address: str) -> str:
         "opencl": False,
         "cuda": False,
         "print-time": 60,
-        "retries": 999,
+        "retries": 999,                     # ← تلاش مجدد بالا
         "retry-pause": 10,
         "health-print-time": 60
     }
@@ -96,7 +91,6 @@ def generate_config(wallet_address: str) -> str:
 def start_miner(wallet: str):
     global miner_process, miner_status
     
-    # توقف ماینر قبلی
     if miner_process and miner_process.poll() is None:
         miner_process.terminate()
         time.sleep(2)
@@ -106,19 +100,17 @@ def start_miner(wallet: str):
 
     config_path = generate_config(wallet)
 
-    # پیدا کردن فایل اجرایی XMRig
     xmrig_path = "/usr/local/bin/xmrig"
     if not os.path.exists(xmrig_path):
         xmrig_path = "/xmrig/build/xmrig"
         if not os.path.exists(xmrig_path):
-            miner_status["error"] = "xmrig executable not found!"
+            miner_status["error"] = "xmrig not found!"
             raise Exception("xmrig executable not found!")
 
     if not os.access(xmrig_path, os.X_OK):
         os.chmod(xmrig_path, 0o755)
 
     try:
-        # اجرای ماینر
         miner_process = subprocess.Popen(
             [xmrig_path, "-c", config_path, "--donate-level=1"],
             stdout=subprocess.PIPE,
@@ -127,11 +119,9 @@ def start_miner(wallet: str):
             bufsize=1
         )
         
-        # به‌روزرسانی وضعیت
         miner_status["running"] = True
         miner_status["wallet"] = wallet
         miner_status["start_time"] = time.time()
-        miner_status["uptime"] = 0
         miner_status["error"] = None
         miner_status["hashrate"] = 0
         miner_status["shares_good"] = 0
@@ -139,22 +129,20 @@ def start_miner(wallet: str):
         
         print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد (PID: {miner_process.pid})")
         
-        # شروع تسک‌های پس‌زمینه
         asyncio.create_task(wait_for_api())
         asyncio.create_task(monitor_miner())
         
     except Exception as e:
         miner_status["running"] = False
         miner_status["error"] = str(e)
-        print(f"❌ خطا در راه‌اندازی ماینر: {e}")
+        print(f"❌ خطا: {e}")
         raise
 
 async def wait_for_api():
-    """منتظر می‌ماند تا API ماینر فعال شود"""
     for i in range(30):
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get("http://localhost:8080/api/summary")
+                resp = await client.get("http://localhost:8081/api/summary")
                 if resp.status_code == 200:
                     miner_status["connected"] = True
                     print("✅ API ماینر فعال شد")
@@ -165,7 +153,6 @@ async def wait_for_api():
     print("⚠️ API ماینر پس از 30 ثانیه فعال نشد")
 
 async def monitor_miner():
-    """پایش خروجی ماینر برای تشخیص خطاها"""
     global miner_process, miner_status
     if not miner_process:
         return
@@ -177,7 +164,6 @@ async def monitor_miner():
                 line = line.strip()
                 print(f"[XMRig] {line}")
                 
-                # تشخیص رویدادهای مهم
                 if "accepted" in line.lower():
                     miner_status["shares_good"] += 1
                 elif "reject" in line.lower():
@@ -189,7 +175,6 @@ async def monitor_miner():
                     
             await asyncio.sleep(0.1)
         
-        # اگر ماینر متوقف شد
         if miner_process and miner_process.poll() is not None:
             exit_code = miner_process.poll()
             print(f"⚠️ ماینر با کد {exit_code} متوقف شد")
@@ -199,7 +184,7 @@ async def monitor_miner():
                 miner_status["error"] = f"Exit code: {exit_code}"
             
     except Exception as e:
-        print(f"⚠️ خطا در پایش ماینر: {e}")
+        print(f"⚠️ خطا در پایش: {e}")
 
 def stop_miner():
     global miner_process, miner_status
@@ -213,7 +198,6 @@ def stop_miner():
     miner_status["connected"] = False
     print("⏹️ ماینر متوقف شد")
 
-# ─── دریافت آمار از ماینر ────────────────────────────────────────────────────
 async def fetch_stats():
     global miner_status, history
     
@@ -222,14 +206,12 @@ async def fetch_stats():
         
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            # امتحان مسیرهای مختلف API
             for path in ["/api/summary", "/summary", "/2/summary"]:
                 try:
-                    resp = await client.get(f"http://localhost:8080{path}")
+                    resp = await client.get(f"http://localhost:8081{path}")
                     if resp.status_code == 200:
                         data = resp.json()
                         
-                        # استخراج داده‌ها
                         hashrate = data.get("hashrate", {}).get("total", [0])[0]
                         if hashrate > miner_status["hashrate_highest"]:
                             miner_status["hashrate_highest"] = hashrate
@@ -240,7 +222,6 @@ async def fetch_stats():
                         miner_status["uptime"] = int(time.time() - miner_status.get("start_time", time.time()))
                         miner_status["last_update"] = time.time()
                         
-                        # ذخیره تاریخچه برای نمودار
                         history.append({
                             "time": datetime.now().isoformat(),
                             "hashrate": hashrate
@@ -257,12 +238,10 @@ async def fetch_stats():
         print(f"⚠️ خطا در دریافت آمار: {e}")
 
 async def periodic_fetch():
-    """دریافت آمار به صورت دوره‌ای"""
     while True:
         await fetch_stats()
         await asyncio.sleep(10)
 
-# ─── رویدادهای شروع و پایان ──────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     signal.signal(signal.SIGTERM, lambda sig, frame: None)
@@ -273,19 +252,17 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     stop_miner()
-    print("👋 اپلیکیشن متوقف شد")
 
-# ─── API Endpointها ───────────────────────────────────────────────────────────
 @app.post("/api/start-mining")
 async def start_mining(config: WalletConfig):
     if not config.wallet or len(config.wallet.strip()) < 5:
         raise HTTPException(status_code=400, detail="لطفاً آدرس کیف پول را وارد کنید")
     
-    # بررسی اینکه آیا آدرس مونرو است (حدود 95 کاراکتر، شروع با 4)
+    # چک کردن اینکه آدرس مونرو باشد (حدود 95 کاراکتر)
     if len(config.wallet.strip()) < 90:
         return {
             "status": "warning", 
-            "message": "⚠️ این آدرس کوتاه‌تر از آدرس استاندارد مونرو است. آیا مطمئن هستید؟"
+            "message": "⚠️ این آدرس کوتاه‌تر از آدرس استاندارد مونرو است. مطمئن هستید؟"
         }
     
     try:
@@ -316,7 +293,6 @@ async def health():
         "uptime": miner_status["uptime"]
     }
 
-# ─── صفحه HTML داشبورد ───────────────────────────────────────────────────────
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -335,273 +311,55 @@ HTML_PAGE = """
             --primary: #4fc3f7;
             --success: #4caf50;
             --danger: #ef5350;
-            --warning: #ffa726;
             --text: #e0e8f0;
             --text-dim: #6a7fa0;
             --radius: 14px;
         }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            padding: 20px;
-            direction: rtl;
-            min-height: 100vh;
-        }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 20px; direction: rtl; min-height: 100vh; }
         .container { max-width: 1300px; margin: 0 auto; }
-        
-        /* هدر */
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 16px;
-            margin-bottom: 28px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--border);
-        }
-        .header h1 {
-            font-size: 26px;
-            font-weight: 700;
-            color: var(--primary);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+        .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+        .header h1 { font-size: 26px; font-weight: 700; color: var(--primary); display: flex; align-items: center; gap: 10px; }
         .header h1 i { font-size: 28px; }
-        .header-info {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 13px;
-            font-weight: 600;
-        }
-        .status-badge.online {
-            background: rgba(76, 175, 80, 0.15);
-            color: var(--success);
-            border: 1px solid rgba(76, 175, 80, 0.3);
-        }
-        .status-badge.offline {
-            background: rgba(239, 83, 80, 0.15);
-            color: var(--danger);
-            border: 1px solid rgba(239, 83, 80, 0.3);
-        }
-        .status-badge .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-        }
+        .header-info { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+        .status-badge.online { background: rgba(76, 175, 80, 0.15); color: var(--success); border: 1px solid rgba(76, 175, 80, 0.3); }
+        .status-badge.offline { background: rgba(239, 83, 80, 0.15); color: var(--danger); border: 1px solid rgba(239, 83, 80, 0.3); }
+        .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
         .status-badge .dot.online { background: var(--success); animation: pulse 2s infinite; }
         .status-badge .dot.offline { background: var(--danger); }
-        
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
-        }
-        
-        /* کارت‌ها */
-        .card {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 20px 24px;
-            margin-bottom: 18px;
-            transition: border-color 0.3s;
-        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; margin-bottom: 18px; transition: border-color 0.3s; }
         .card:hover { border-color: rgba(79, 195, 247, 0.2); }
-        .card-title {
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-dim);
-            margin-bottom: 10px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-        
-        /* فرم ورودی کیف پول */
-        .wallet-section {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            align-items: center;
-        }
-        .wallet-section input {
-            flex: 1;
-            min-width: 280px;
-            padding: 12px 18px;
-            border-radius: 10px;
-            border: 1px solid var(--border);
-            background: rgba(255,255,255,0.04);
-            color: var(--text);
-            font-size: 14px;
-            font-family: monospace;
-            transition: border-color 0.3s;
-            outline: none;
-            letter-spacing: 0.3px;
-        }
-        .wallet-section input:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(79, 195, 247, 0.1);
-        }
-        .wallet-section input::placeholder {
-            color: var(--text-dim);
-            font-family: 'Segoe UI', sans-serif;
-        }
-        .btn {
-            padding: 12px 24px;
-            border-radius: 10px;
-            border: none;
-            font-weight: 600;
-            font-size: 14px;
-            cursor: pointer;
-            transition: all 0.2s;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .btn-start {
-            background: linear-gradient(135deg, #1b8a3b, #0d6b2a);
-            color: #fff;
-        }
+        .card-title { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 10px; display: flex; align-items: center; gap: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+        .wallet-section { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+        .wallet-section input { flex: 1; min-width: 280px; padding: 12px 18px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); font-size: 14px; font-family: monospace; transition: border-color 0.3s; outline: none; }
+        .wallet-section input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79, 195, 247, 0.1); }
+        .wallet-section input::placeholder { color: var(--text-dim); font-family: 'Segoe UI', sans-serif; }
+        .btn { padding: 12px 24px; border-radius: 10px; border: none; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 8px; }
+        .btn-start { background: linear-gradient(135deg, #1b8a3b, #0d6b2a); color: #fff; }
         .btn-start:hover { transform: translateY(-2px); box-shadow: 0 4px 20px rgba(27, 138, 59, 0.35); }
-        .btn-stop {
-            background: linear-gradient(135deg, #b71c1c, #7f0000);
-            color: #fff;
-        }
+        .btn-stop { background: linear-gradient(135deg, #b71c1c, #7f0000); color: #fff; }
         .btn-stop:hover { transform: translateY(-2px); box-shadow: 0 4px 20px rgba(183, 28, 28, 0.35); }
-        .btn-refresh {
-            background: rgba(79, 195, 247, 0.12);
-            color: var(--primary);
-            border: 1px solid rgba(79, 195, 247, 0.15);
-        }
+        .btn-refresh { background: rgba(79, 195, 247, 0.12); color: var(--primary); border: 1px solid rgba(79, 195, 247, 0.15); }
         .btn-refresh:hover { background: rgba(79, 195, 247, 0.2); }
-        
-        /* متریک‌ها */
-        .metrics {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 16px;
-            margin-bottom: 18px;
-        }
-        .metric {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 18px 20px;
-            transition: all 0.3s;
-        }
-        .metric:hover {
-            border-color: rgba(79, 195, 247, 0.25);
-            transform: translateY(-2px);
-        }
-        .metric-label {
-            font-size: 11px;
-            color: var(--text-dim);
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            font-weight: 600;
-        }
-        .metric-value {
-            font-size: 28px;
-            font-weight: 700;
-            margin-top: 4px;
-            color: var(--text);
-        }
-        .metric-value .unit {
-            font-size: 14px;
-            font-weight: 400;
-            color: var(--text-dim);
-            margin-right: 4px;
-        }
-        .metric-sub {
-            font-size: 11px;
-            color: var(--text-dim);
-            margin-top: 4px;
-        }
-        
-        /* نمودار */
-        .chart-container {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 20px 24px;
-            margin-top: 10px;
-        }
-        .chart-container canvas {
-            width: 100% !important;
-            height: 280px !important;
-        }
-        
-        /* خطا */
-        .error-box {
-            background: rgba(239, 83, 80, 0.08);
-            border: 1px solid rgba(239, 83, 80, 0.2);
-            border-radius: 10px;
-            padding: 12px 16px;
-            margin-top: 12px;
-            color: var(--danger);
-            font-size: 13px;
-            display: none;
-            align-items: center;
-            gap: 10px;
-        }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 18px; }
+        .metric { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; transition: all 0.3s; }
+        .metric:hover { border-color: rgba(79, 195, 247, 0.25); transform: translateY(-2px); }
+        .metric-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+        .metric-value { font-size: 28px; font-weight: 700; margin-top: 4px; color: var(--text); }
+        .metric-value .unit { font-size: 14px; font-weight: 400; color: var(--text-dim); margin-right: 4px; }
+        .metric-sub { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+        .chart-container { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; margin-top: 10px; }
+        .chart-container canvas { width: 100% !important; height: 280px !important; }
+        .error-box { background: rgba(239, 83, 80, 0.08); border: 1px solid rgba(239, 83, 80, 0.2); border-radius: 10px; padding: 12px 16px; margin-top: 12px; color: var(--danger); font-size: 13px; display: none; align-items: center; gap: 10px; }
         .error-box.show { display: flex; }
-        
-        /* وضعیت اتصال */
-        .connection-info {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 13px;
-            color: var(--text-dim);
-        }
-        .connection-info .connected {
-            color: var(--success);
-        }
-        .connection-info .disconnected {
-            color: var(--danger);
-        }
-        
-        /* فوتر */
-        .footer {
-            text-align: center;
-            color: var(--text-dim);
-            font-size: 12px;
-            padding-top: 20px;
-            border-top: 1px solid var(--border);
-            margin-top: 20px;
-        }
-        .footer a {
-            color: var(--primary);
-            text-decoration: none;
-        }
-        
-        /* واکنش‌گرا */
-        @media (max-width: 640px) {
-            body { padding: 12px; }
-            .header h1 { font-size: 20px; }
-            .metric-value { font-size: 22px; }
-            .wallet-section input { min-width: 160px; }
-            .btn { padding: 10px 16px; font-size: 13px; }
-        }
+        .footer { text-align: center; color: var(--text-dim); font-size: 12px; padding-top: 20px; border-top: 1px solid var(--border); margin-top: 20px; }
+        .footer a { color: var(--primary); text-decoration: none; }
+        @media (max-width: 640px) { body { padding: 12px; } .header h1 { font-size: 20px; } .metric-value { font-size: 22px; } .wallet-section input { min-width: 160px; } .btn { padding: 10px 16px; font-size: 13px; } }
     </style>
 </head>
 <body>
 <div class="container">
-    <!-- هدر -->
     <div class="header">
         <h1><i class="fas fa-microchip"></i> ⛏️ ماینینگ مونرو</h1>
         <div class="header-info">
@@ -614,8 +372,6 @@ HTML_PAGE = """
             </button>
         </div>
     </div>
-
-    <!-- کارت تنظیم کیف پول -->
     <div class="card">
         <div class="card-title"><i class="fas fa-wallet"></i> 🔑 کیف پول</div>
         <div class="wallet-section">
@@ -635,9 +391,7 @@ HTML_PAGE = """
             <span id="errorText"></span>
         </div>
     </div>
-
-    <!-- متریک‌ها -->
-    <div class="metrics" id="metrics">
+    <div class="metrics">
         <div class="metric">
             <div class="metric-label"><i class="fas fa-tachometer-alt"></i> هش‌ریت</div>
             <div class="metric-value" id="hashrate">-- <span class="unit">H/s</span></div>
@@ -659,8 +413,6 @@ HTML_PAGE = """
             <div class="metric-sub" id="poolName">استخر: --</div>
         </div>
     </div>
-
-    <!-- نمودار -->
     <div class="chart-container">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
             <div class="card-title" style="margin-bottom:0;"><i class="fas fa-chart-line"></i> نمودار هش‌ریت</div>
@@ -668,8 +420,6 @@ HTML_PAGE = """
         </div>
         <canvas id="chart"></canvas>
     </div>
-
-    <!-- فوتر -->
     <div class="footer">
         <i class="fas fa-bolt"></i> بهینه‌سازی شده برای Railway · 
         <i class="fas fa-memory"></i> مصرف رم &lt; 1GB · 
@@ -677,14 +427,11 @@ HTML_PAGE = """
         <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a>
     </div>
 </div>
-
 <script>
-// ─── متغیرهای عمومی ──────────────────────────────────────────────────────────
 let chartInstance = null;
 let historyData = [];
 let refreshInterval = null;
 
-// ─── شروع ماینینگ ────────────────────────────────────────────────────────────
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
     if (!wallet || wallet.length < 5) {
@@ -715,7 +462,6 @@ async function startMining() {
     fetchAll();
 }
 
-// ─── توقف ماینینگ ────────────────────────────────────────────────────────────
 async function stopMining() {
     document.getElementById('statusMsg').innerHTML = '⏹️ در حال توقف...';
     try {
@@ -728,7 +474,6 @@ async function stopMining() {
     fetchAll();
 }
 
-// ─── دریافت وضعیت ─────────────────────────────────────────────────────────────
 async function fetchStatus() {
     try {
         const res = await fetch('/api/miner-status');
@@ -739,7 +484,6 @@ async function fetchStatus() {
     }
 }
 
-// ─── دریافت تاریخچه ──────────────────────────────────────────────────────────
 async function fetchHistory() {
     try {
         const res = await fetch('/api/history');
@@ -750,9 +494,7 @@ async function fetchHistory() {
     }
 }
 
-// ─── بروزرسانی UI ────────────────────────────────────────────────────────────
 function updateUI(data) {
-    // هش‌ریت
     const hashrate = data.hashrate || 0;
     document.getElementById('hashrate').innerHTML = 
         hashrate > 0 ? (hashrate/1e3).toFixed(1) + ' <span class="unit">KH/s</span>' : '-- <span class="unit">H/s</span>';
@@ -761,25 +503,20 @@ function updateUI(data) {
     document.getElementById('hashrateHighest').textContent = 
         highest > 0 ? (highest/1e3).toFixed(1) + ' KH/s' : '--';
     
-    // شارها
     document.getElementById('sharesGood').textContent = data.shares_good || 0;
     document.getElementById('sharesTotal').textContent = data.shares_total || 0;
     document.getElementById('sharesRejected').textContent = data.shares_rejected || 0;
     
-    // آپتایم
     document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
     document.getElementById('lastUpdate').textContent = data.last_update ? 
         new Date(data.last_update * 1000).toLocaleTimeString('fa-IR') : '--';
     
-    // کیف پول
     document.getElementById('walletDisplay').textContent = data.wallet ? 
         data.wallet.slice(0, 12) + '...' : '--';
     
-    // استخر
     document.getElementById('poolStatus').textContent = data.connected ? '🟢 متصل' : '🔴 قطع';
     document.getElementById('poolName').textContent = data.pool ? 'استخر: ' + data.pool : 'استخر: --';
     
-    // وضعیت
     const badge = document.getElementById('statusBadge');
     const dot = document.getElementById('statusDot');
     const text = document.getElementById('statusText');
@@ -798,14 +535,12 @@ function updateUI(data) {
         text.textContent = '⏹️ غیرفعال';
     }
     
-    // خطا
     if (data.error) {
         showError(data.error);
     } else {
         document.getElementById('errorBox').classList.remove('show');
     }
     
-    // بروزرسانی تاریخچه
     if (data.running && data.hashrate > 0) {
         historyData.push({ time: new Date().toISOString(), hashrate: data.hashrate });
         if (historyData.length > 100) historyData.shift();
@@ -813,14 +548,12 @@ function updateUI(data) {
     }
 }
 
-// ─── نمایش خطا ───────────────────────────────────────────────────────────────
 function showError(msg) {
     const box = document.getElementById('errorBox');
     document.getElementById('errorText').textContent = msg;
     box.classList.add('show');
 }
 
-// ─── فرمت آپتایم ──────────────────────────────────────────────────────────────
 function formatUptime(sec) {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
@@ -828,10 +561,9 @@ function formatUptime(sec) {
     return h + 'h ' + m + 'm ' + s + 's';
 }
 
-// ─── بروزرسانی نمودار ────────────────────────────────────────────────────────
 function updateChart() {
     const labels = historyData.map(p => new Date(p.time).toLocaleTimeString('fa-IR'));
-    const values = historyData.map(p => p.hashrate / 1e3); // تبدیل به KH/s
+    const values = historyData.map(p => p.hashrate / 1e3);
     
     const ctx = document.getElementById('chart').getContext('2d');
     
@@ -884,25 +616,21 @@ function updateChart() {
     }
 }
 
-// ─── بروزرسانی همه ───────────────────────────────────────────────────────────
 async function fetchAll() {
     await fetchStatus();
     await fetchHistory();
 }
 
-// ─── راه‌اندازی ──────────────────────────────────────────────────────────────
 fetchAll();
-refreshInterval = setInterval(fetchAll, 8081);
+refreshInterval = setInterval(fetchAll, 8000);
 </script>
-</body>
-</html>
+</body></html>
 """
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     return HTMLResponse(HTML_PAGE)
 
-# ─── اجرا ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8081))
+    port = int(os.environ.get("PORT", 8080))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
