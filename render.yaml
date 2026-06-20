@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: monero-miner
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    port: 8080
