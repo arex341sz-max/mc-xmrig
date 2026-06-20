@@ -6,6 +6,8 @@ import asyncio
 import httpx
 import signal
 import psutil
+import socket
+import ssl
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -38,26 +40,95 @@ miner_status = {
     "start_time": None,
     "last_update": None,
     "pool": "",
+    "pool_name": "",
     "error": None,
     "connected": False,
-    "memory_usage_mb": 0,  # مصرف رم ماینر
+    "memory_usage_mb": 0,
+    "connecting": False,
+    "best_pool": None,
 }
 history = []
+pool_test_results = []
 
+# ─── لیست استخرها ──────────────────────────────────────────────────────────────
+MINING_POOLS = [
+    {"name": "SupportXMR", "url": "pool.supportxmr.com", "port": 443, "tls": True},
+    {"name": "MoneroOcean", "url": "gulf.moneroocean.stream", "port": 10128, "tls": True},
+    {"name": "Nanopool", "url": "xmr.nanopool.org", "port": 14433, "tls": True},
+    {"name": "HashVault", "url": "pool.hashvault.pro", "port": 443, "tls": True},
+    {"name": "OMINE", "url": "xmr.omine.ga", "port": 3000, "tls": True},
+]
+
+# ─── تست اتصال به استخر ──────────────────────────────────────────────────────
+async def test_single_pool(pool: dict) -> dict:
+    """یک استخر را تست می‌کند و زمان پاسخ را اندازه می‌گیرد"""
+    start = time.time()
+    result = {
+        "name": pool["name"],
+        "url": pool["url"],
+        "port": pool["port"],
+        "working": False,
+        "response_time": 999,
+        "error": None
+    }
+    
+    try:
+        if pool.get("tls", False):
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((pool["url"], pool["port"]), timeout=3) as sock:
+                with context.wrap_socket(sock, server_hostname=pool["url"]) as ssock:
+                    result["working"] = True
+        else:
+            with socket.create_connection((pool["url"], pool["port"]), timeout=3) as sock:
+                result["working"] = True
+        result["response_time"] = round((time.time() - start) * 1000, 0)  # میلی‌ثانیه
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
+
+async def test_all_pools():
+    """همه استخرها را تست می‌کند و بهترین را انتخاب می‌کند"""
+    global pool_test_results, miner_status
+    print("🔍 در حال تست استخرها...")
+    results = []
+    
+    for pool in MINING_POOLS:
+        print(f"  📡 تست {pool['name']}...")
+        result = await test_single_pool(pool)
+        results.append(result)
+        if result["working"]:
+            print(f"    ✅ {pool['name']} کار می‌کند! ({result['response_time']}ms)")
+        else:
+            print(f"    ❌ {pool['name']} پاسخ نمی‌دهد")
+        await asyncio.sleep(0.3)
+    
+    pool_test_results = results
+    
+    # انتخاب بهترین استخر (سریع‌ترین پاسخ)
+    working_pools = [p for p in results if p["working"]]
+    if working_pools:
+        best = min(working_pools, key=lambda x: x["response_time"])
+        miner_status["best_pool"] = best
+        print(f"🏆 بهترین استخر: {best['name']} ({best['response_time']}ms)")
+        return best
+    else:
+        print("⚠️ هیچ استخری پاسخ نداد! استفاده از SupportXMR به عنوان پیش‌فرض")
+        return {"name": "SupportXMR", "url": "pool.supportxmr.com", "port": 443, "tls": True}
+
+# ─── توابع مدیریت ماینر ──────────────────────────────────────────────────────
 def get_process_memory():
-    """دریافت مصرف رم ماینر به مگابایت"""
-    global miner_process
     if miner_process and miner_process.pid:
         try:
             proc = psutil.Process(miner_process.pid)
-            mem = proc.memory_info().rss / 1024 / 1024  # تبدیل به مگابایت
-            return round(mem, 1)
+            return round(proc.memory_info().rss / 1024 / 1024, 1)
         except:
             return 0
     return 0
 
-def generate_config(wallet_address: str) -> str:
-    """تنظیمات با مصرف رم زیر ۵۱۲ مگابایت و TLS صحیح"""
+def generate_config(wallet_address: str, pool_url: str, pool_port: int, use_tls: bool) -> str:
     template = {
         "autosave": False,
         "cpu": {
@@ -71,10 +142,10 @@ def generate_config(wallet_address: str) -> str:
         },
         "pools": [
             {
-                "url": "pool.supportxmr.com:443",
+                "url": f"{pool_url}:{pool_port}",
                 "user": wallet_address,
                 "pass": "railway_worker",
-                "tls": True,
+                "tls": use_tls,
                 "keepalive": True,
                 "nicehash": False,
                 "enabled": True
@@ -104,8 +175,25 @@ def generate_config(wallet_address: str) -> str:
         json.dump(template, f, indent=2)
     return config_path
 
-def start_miner(wallet: str):
+async def start_miner_with_timeout(wallet: str, timeout_seconds: int = 30):
+    """ماینر را با تایم‌اوت اجرا می‌کند تا اگر نتونست وصل شه، کرش نکنه"""
     global miner_process, miner_status
+    
+    # اول بهترین استخر رو پیدا کن
+    best = miner_status.get("best_pool")
+    if not best:
+        best = await test_all_pools()
+    
+    if not best or not best.get("working"):
+        # اگر هیچ استخری کار نکرد، از پیش‌فرض استفاده کن
+        best = {"name": "SupportXMR", "url": "pool.supportxmr.com", "port": 443, "tls": True}
+    
+    pool_url = best["url"]
+    pool_port = best["port"]
+    use_tls = best.get("tls", True)
+    pool_name = best["name"]
+    
+    print(f"🌐 استفاده از استخر: {pool_name} ({pool_url}:{pool_port})")
     
     if miner_process and miner_process.poll() is None:
         miner_process.terminate()
@@ -114,7 +202,7 @@ def start_miner(wallet: str):
             miner_process.kill()
         miner_process = None
 
-    config_path = generate_config(wallet)
+    config_path = generate_config(wallet, pool_url, pool_port, use_tls)
 
     xmrig_path = "/usr/local/bin/xmrig"
     if not os.path.exists(xmrig_path):
@@ -136,38 +224,52 @@ def start_miner(wallet: str):
         )
         
         miner_status["running"] = True
+        miner_status["connecting"] = True
         miner_status["wallet"] = wallet
         miner_status["start_time"] = time.time()
         miner_status["error"] = None
         miner_status["hashrate"] = 0
         miner_status["shares_good"] = 0
         miner_status["connected"] = False
-        miner_status["memory_usage_mb"] = 0
+        miner_status["pool"] = f"{pool_url}:{pool_port}"
+        miner_status["pool_name"] = pool_name
         
         print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد (PID: {miner_process.pid})")
         
-        asyncio.create_task(wait_for_api())
+        # شروع تسک‌ها با تایم‌اوت
+        asyncio.create_task(wait_for_api_with_timeout(timeout_seconds))
         asyncio.create_task(monitor_miner())
+        
+        return True
         
     except Exception as e:
         miner_status["running"] = False
+        miner_status["connecting"] = False
         miner_status["error"] = str(e)
         print(f"❌ خطا: {e}")
         raise
 
-async def wait_for_api():
-    for i in range(30):
+async def wait_for_api_with_timeout(timeout: int = 30):
+    """منتظر API با تایم‌اوت - اگر نشد، ماینر رو متوقف کن"""
+    for i in range(timeout):
+        if not miner_status["running"]:
+            return
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.get("http://localhost:8081/api/summary")
                 if resp.status_code == 200:
                     miner_status["connected"] = True
-                    print("✅ API ماینر فعال شد")
+                    miner_status["connecting"] = False
+                    print("✅ API ماینر فعال شد و به استخر متصل گردید")
                     return
         except:
             pass
         await asyncio.sleep(1)
-    print("⚠️ API ماینر فعال نشد")
+    
+    # اگر timeout شد و هنوز وصل نشده، ماینر رو متوقف کن
+    print("⏰ زمان اتصال به استخر به پایان رسید. ماینر متوقف می‌شود.")
+    miner_status["error"] = "اتصال به استخر ناموفق (timeout)"
+    stop_miner()
 
 async def monitor_miner():
     global miner_process, miner_status
@@ -183,14 +285,16 @@ async def monitor_miner():
                 
                 if "accepted" in line.lower():
                     miner_status["shares_good"] += 1
+                    miner_status["connected"] = True
+                    miner_status["connecting"] = False
                 elif "reject" in line.lower():
                     miner_status["shares_rejected"] += 1
                 elif "error" in line.lower() or "failed" in line.lower():
                     miner_status["error"] = line
                 elif "connected" in line.lower():
                     miner_status["connected"] = True
+                    miner_status["connecting"] = False
                     
-            # به‌روزرسانی مصرف رم
             miner_status["memory_usage_mb"] = get_process_memory()
             await asyncio.sleep(0.1)
         
@@ -199,8 +303,8 @@ async def monitor_miner():
             print(f"⚠️ ماینر با کد {exit_code} متوقف شد")
             miner_status["running"] = False
             miner_status["connected"] = False
-            miner_status["memory_usage_mb"] = 0
-            if exit_code != 0:
+            miner_status["connecting"] = False
+            if exit_code != 0 and exit_code != -9:
                 miner_status["error"] = f"Exit code: {exit_code}"
             
     except Exception as e:
@@ -216,9 +320,11 @@ def stop_miner():
         miner_process = None
     miner_status["running"] = False
     miner_status["connected"] = False
+    miner_status["connecting"] = False
     miner_status["memory_usage_mb"] = 0
     print("⏹️ ماینر متوقف شد")
 
+# ─── دریافت آمار ──────────────────────────────────────────────────────────────
 async def fetch_stats():
     global miner_status, history
     
@@ -232,29 +338,19 @@ async def fetch_stats():
                     resp = await client.get(f"http://localhost:8081{path}")
                     if resp.status_code == 200:
                         data = resp.json()
-                        
                         hashrate = data.get("hashrate", {}).get("total", [0])[0]
                         if hashrate > miner_status["hashrate_highest"]:
                             miner_status["hashrate_highest"] = hashrate
-                            
                         miner_status["hashrate"] = hashrate
                         miner_status["shares_total"] = data.get("results", {}).get("shares_total", 0)
-                        miner_status["pool"] = data.get("pool", "")
                         miner_status["uptime"] = int(time.time() - miner_status.get("start_time", time.time()))
                         miner_status["last_update"] = time.time()
-                        
-                        history.append({
-                            "time": datetime.now().isoformat(),
-                            "hashrate": hashrate
-                        })
+                        history.append({"time": datetime.now().isoformat(), "hashrate": hashrate})
                         if len(history) > 100:
                             history = history[-100:]
-                        
-                        print(f"📊 هش: {hashrate/1e3:.0f} H/s | رم: {miner_status['memory_usage_mb']} MB")
                         return
                 except:
                     continue
-                    
     except Exception as e:
         print(f"⚠️ خطا در دریافت آمار: {e}")
 
@@ -263,10 +359,15 @@ async def periodic_fetch():
         await fetch_stats()
         await asyncio.sleep(5)
 
+# ─── رویدادهای شروع و پایان ──────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     signal.signal(signal.SIGTERM, lambda sig, frame: None)
     asyncio.create_task(periodic_fetch())
+    
+    # تست استخرها در پس‌زمینه
+    asyncio.create_task(test_all_pools())
+    
     print("🚀 داشبورد ماینینگ راه‌اندازی شد")
     print("📌 برای شروع، آدرس کیف پول مونرو خود را وارد کنید")
 
@@ -274,19 +375,25 @@ async def startup():
 async def shutdown():
     stop_miner()
 
+# ─── API ──────────────────────────────────────────────────────────────────────
+@app.get("/api/pool-test")
+async def get_pool_test():
+    return JSONResponse(pool_test_results)
+
+@app.get("/api/best-pool")
+async def get_best_pool():
+    return JSONResponse(miner_status.get("best_pool", {}))
+
 @app.post("/api/start-mining")
 async def start_mining(config: WalletConfig):
     if not config.wallet or len(config.wallet.strip()) < 5:
         raise HTTPException(status_code=400, detail="لطفاً آدرس کیف پول را وارد کنید")
     
     if len(config.wallet.strip()) < 90:
-        return {
-            "status": "warning", 
-            "message": "⚠️ این آدرس کوتاه‌تر از آدرس استاندارد مونرو است."
-        }
+        return {"status": "warning", "message": "⚠️ این آدرس کوتاه‌تر از آدرس استاندارد مونرو است."}
     
     try:
-        start_miner(config.wallet)
+        await start_miner_with_timeout(config.wallet, timeout_seconds=30)
         return {"status": "ok", "message": f"✅ ماینینگ با {config.wallet[:10]}... شروع شد"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -310,8 +417,10 @@ async def health():
         "status": "ok",
         "miner_running": miner_status["running"],
         "connected": miner_status["connected"],
+        "connecting": miner_status["connecting"],
         "uptime": miner_status["uptime"],
-        "memory_mb": miner_status["memory_usage_mb"]
+        "memory_mb": miner_status["memory_usage_mb"],
+        "pool": miner_status["pool_name"]
     }
 
 # ─── صفحه HTML ─────────────────────────────────────────────────────────────────
@@ -336,7 +445,7 @@ HTML_PAGE = """
         .btn-start { background: #1b8a3b; color: #fff; }
         .btn-stop { background: #b71c1c; color: #fff; }
         .btn-refresh { background: rgba(79,195,247,0.12); color: #4fc3f7; border: 1px solid rgba(79,195,247,0.15); }
-        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
         .metric { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 12px 14px; }
         .metric-label { font-size: 10px; color: #6a7fa0; }
         .metric-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
@@ -357,8 +466,10 @@ HTML_PAGE = """
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
         .ram-bar { width: 100%; height: 4px; background: #1e2a45; border-radius: 2px; margin-top: 4px; overflow: hidden; }
         .ram-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
-        .ram-warning { color: #ffc107; }
-        .ram-danger { color: #ef5350; }
+        .pool-list { font-size: 12px; }
+        .pool-list .ok { color: #4caf50; }
+        .pool-list .fail { color: #ef5350; }
+        .pool-list .best { background: rgba(76,175,80,0.15); border: 1px solid rgba(76,175,80,0.2); border-radius: 4px; padding: 2px 8px; }
         @media (max-width: 500px) { .header h1 { font-size: 17px; } .metric-value { font-size: 17px; } }
     </style>
 </head>
@@ -390,11 +501,19 @@ HTML_PAGE = """
             <div class="ram-bar"><div class="ram-fill" id="ramFill" style="width:0%;background:#4fc3f7;"></div></div>
         </div>
     </div>
+    <div class="card">
+        <div class="metric-label">🌐 نتایج تست استخرها</div>
+        <div id="poolTestResults" class="pool-list" style="margin-top:6px;font-size:12px;">
+            <span style="color:#6a7fa0;">در حال تست...</span>
+        </div>
+        <div id="bestPoolDisplay" style="margin-top:6px;font-size:12px;color:#4fc3f7;"></div>
+    </div>
     <div class="chart-container"><canvas id="chart"></canvas></div>
     <div class="footer">⚡ رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
 </div>
 <script>
 let chartInstance = null, historyData = [];
+
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
     if (!wallet || wallet.length < 5) { alert('آدرس را وارد کنید'); return; }
@@ -419,13 +538,43 @@ async function fetchStatus() {
 async function fetchHistory() {
     try { const res = await fetch('/api/history'); historyData = await res.json(); updateChart(); } catch(e) { console.error(e); }
 }
+async function fetchPoolResults() {
+    try {
+        const res = await fetch('/api/pool-test');
+        const data = await res.json();
+        const container = document.getElementById('poolTestResults');
+        if (!data || data.length === 0) { container.innerHTML = '<span style="color:#6a7fa0;">⏳ در حال تست...</span>'; return; }
+        let html = '';
+        for (const p of data) {
+            const icon = p.working ? '✅' : '❌';
+            const color = p.working ? '#4caf50' : '#ef5350';
+            const time = p.working ? p.response_time + 'ms' : '—';
+            html += `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1e2a45;">
+                <span>${icon} <strong>${p.name}</strong> (${p.url}:${p.port})</span>
+                <span style="color:${color};font-size:11px;">${time}</span>
+            </div>`;
+        }
+        container.innerHTML = html;
+    } catch(e) { console.error(e); }
+}
+async function fetchBestPool() {
+    try {
+        const res = await fetch('/api/best-pool');
+        const data = await res.json();
+        const el = document.getElementById('bestPoolDisplay');
+        if (data && data.working) {
+            el.innerHTML = `🏆 بهترین استخر: <strong>${data.name}</strong> (${data.response_time}ms) — ${data.url}:${data.port}`;
+        } else {
+            el.innerHTML = '⚠️ هیچ استخری در دسترس نیست';
+        }
+    } catch(e) { console.error(e); }
+}
 function updateUI(data) {
     const hr = data.hashrate || 0;
     document.getElementById('hashrate').textContent = hr > 0 ? (hr/1e3).toFixed(1) + ' KH/s' : '--';
     document.getElementById('sharesGood').textContent = data.shares_good || 0;
     document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
     
-    // مصرف رم
     const ram = data.memory_usage_mb || 0;
     document.getElementById('ramUsage').innerHTML = ram > 0 ? ram + ' <span class="unit">MB</span>' : '-- <span class="unit">MB</span>';
     const pct = Math.min(100, (ram / 512) * 100);
@@ -435,10 +584,10 @@ function updateUI(data) {
     else if (pct > 60) { fill.style.background = '#ffc107'; } 
     else { fill.style.background = '#4fc3f7'; }
     
-    // وضعیت
     const badge = document.getElementById('statusBadge'), dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
     if (data.running && data.connected) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '⛏️ فعال'; }
-    else if (data.running) { badge.className = 'status-badge connecting'; dot.className = 'dot connecting'; text.textContent = '🔄 اتصال...'; }
+    else if (data.running && data.connecting) { badge.className = 'status-badge connecting'; dot.className = 'dot connecting'; text.textContent = '🔄 اتصال...'; }
+    else if (data.running) { badge.className = 'status-badge connecting'; dot.className = 'dot connecting'; text.textContent = '🔄 در حال تلاش...'; }
     else { badge.className = 'status-badge offline'; dot.className = 'dot offline'; text.textContent = '⏹️ غیرفعال'; }
     
     if (data.error) { showError(data.error); } else { document.getElementById('errorBox').classList.remove('show'); }
@@ -452,9 +601,9 @@ function updateChart() {
     if (chartInstance) { chartInstance.data.labels = labels; chartInstance.data.datasets[0].data = values; chartInstance.update('none'); }
     else { chartInstance = new Chart(ctx, { type: 'line', data: { labels, datasets: [{ label: 'هش‌ریت (KH/s)', data: values, borderColor: '#4fc3f7', backgroundColor: 'rgba(79,195,247,0.08)', fill: true, tension: 0.4, pointRadius: 2, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#6a7fa0' } } }, scales: { x: { ticks: { color: '#6a7fa0', maxTicksLimit: 12 } }, y: { ticks: { color: '#6a7fa0' }, beginAtZero: true } } } }); }
 }
-async function fetchAll() { await fetchStatus(); await fetchHistory(); }
+async function fetchAll() { await fetchStatus(); await fetchHistory(); await fetchPoolResults(); await fetchBestPool(); }
 fetchAll();
-setInterval(fetchAll, 4000);
+setInterval(fetchAll, 5000);
 </script>
 </body></html>
 """
