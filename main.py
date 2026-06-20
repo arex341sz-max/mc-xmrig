@@ -153,8 +153,8 @@ async def shutdown():
 @app.post("/api/start-mining")
 async def start_mining(config: WalletConfig):
     try:
-        if not config.wallet or len(config.wallet) < 50:
-            raise HTTPException(status_code=400, detail="آدرس کیف پول معتبر نیست")
+    if not config.wallet or len(config.wallet.strip()) < 5:
+    raise HTTPException(status_code=400, detail="آدرس کیف پول معتبر نیست")
         start_miner(config.wallet)
         return {"status": "ok", "message": f"ماینینگ با کیف پول {config.wallet[:8]}... شروع شد"}
     except Exception as e:
