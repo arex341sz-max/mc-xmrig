@@ -152,13 +152,16 @@ async def shutdown():
 # ─── API endpointها ──────────────────────────────────────────────────────────
 @app.post("/api/start-mining")
 async def start_mining(config: WalletConfig):
-    try:
+    # حذف شرط ۵۰ کاراکتری و فقط چک کردن خالی نبودن
     if not config.wallet or len(config.wallet.strip()) < 5:
-    raise HTTPException(status_code=400, detail="آدرس کیف پول معتبر نیست")
+        raise HTTPException(status_code=400, detail="لطفاً آدرس کیف پول خود را وارد کنید")
+    
+    try:
         start_miner(config.wallet)
         return {"status": "ok", "message": f"ماینینگ با کیف پول {config.wallet[:8]}... شروع شد"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+        
 
 @app.post("/api/stop-mining")
 async def stop_mining():
