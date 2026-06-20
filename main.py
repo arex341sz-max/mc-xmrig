@@ -54,7 +54,7 @@ def generate_config(wallet_address: str) -> str:
             "enabled": True,
             "huge-pages": False,
             "hw-aes": True,
-            "max-threads-hint": 2,
+            "max-threads-hint": 1,
             "asm": True,
             "priority": 5
         },
