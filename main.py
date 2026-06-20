@@ -892,7 +892,7 @@ async function fetchAll() {
 
 // ─── راه‌اندازی ──────────────────────────────────────────────────────────────
 fetchAll();
-refreshInterval = setInterval(fetchAll, 8080);
+refreshInterval = setInterval(fetchAll, 8081);
 </script>
 </body>
 </html>
@@ -904,5 +904,5 @@ async def dashboard():
 
 # ─── اجرا ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8081))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
