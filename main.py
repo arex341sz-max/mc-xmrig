@@ -121,7 +121,7 @@ def get_process_memory():
     return 0
 
 def get_system_memory():
-    """دریافت حافظه کل سیستم و حافظه آزاد"""
+    """دریافت حافظه کل سیستم و حافظه آزاد (همزمان)"""
     try:
         mem = psutil.virtual_memory()
         return {
@@ -484,7 +484,7 @@ async def get_history():
     return JSONResponse(history[-100:])
 
 @app.get("/api/system-memory")
-async def get_system_memory():
+async def get_system_memory_endpoint():
     return JSONResponse(get_system_memory())
 
 @app.get("/health")
