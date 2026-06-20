@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+import signal
 
 app = FastAPI()
 app.add_middleware(
@@ -32,6 +33,7 @@ miner_status = {
     "shares": 0,
     "uptime": 0,
     "last_update": None,
+    "error": None,
 }
 
 # ─── توابع مدیریت ماینر ──────────────────────────────────────────────────────
@@ -66,12 +68,14 @@ def generate_config(wallet_address: str) -> str:
         "retries": 999,
         "retry-pause": 10
     }
-    with open("/app/config.json", "w") as f:
+    config_path = "/app/config.json"
+    with open(config_path, "w") as f:
         json.dump(template, f, indent=2)
-    return "/app/config.json"
+    return config_path
 
 def start_miner(wallet: str):
     global miner_process, miner_status
+    
     # اگر ماینر در حال اجراست، آن را متوقف کن
     if miner_process and miner_process.poll() is None:
         miner_process.terminate()
@@ -83,21 +87,73 @@ def start_miner(wallet: str):
     # تولید کانفیگ جدید
     config_path = generate_config(wallet)
 
-    # مسیر فایل اجرایی XMRig (که در Dockerfile به /usr/local/bin کپی شده)
+    # مسیر فایل اجرایی XMRig
     xmrig_path = "/usr/local/bin/xmrig"
     if not os.path.exists(xmrig_path):
-        raise Exception("xmrig executable not found!")
+        xmrig_path = "/xmrig/build/xmrig"
+        if not os.path.exists(xmrig_path):
+            miner_status["error"] = "xmrig executable not found!"
+            raise Exception("xmrig executable not found!")
 
-    miner_process = subprocess.Popen(
-        [xmrig_path, "-c", config_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-    miner_status["running"] = True
-    miner_status["wallet"] = wallet
-    miner_status["start_time"] = time.time()
-    print(f"✅ ماینر با کیف پول {wallet} راه‌اندازی شد (PID: {miner_process.pid})")
+    # بررسی قابلیت اجرا
+    if not os.access(xmrig_path, os.X_OK):
+        os.chmod(xmrig_path, 0o755)
+
+    try:
+        # اجرای ماینر با subprocess و مدیریت خطا
+        miner_process = subprocess.Popen(
+            [xmrig_path, "-c", config_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        
+        miner_status["running"] = True
+        miner_status["wallet"] = wallet
+        miner_status["start_time"] = time.time()
+        miner_status["error"] = None
+        print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد (PID: {miner_process.pid})")
+        
+        # شروع مانیتورینگ در پس‌زمینه
+        asyncio.create_task(monitor_miner())
+        
+    except Exception as e:
+        miner_status["running"] = False
+        miner_status["error"] = str(e)
+        print(f"❌ خطا در راه‌اندازی ماینر: {e}")
+        raise
+
+async def monitor_miner():
+    """مانیتور کردن خروجی ماینر برای تشخیص خطا"""
+    global miner_process, miner_status
+    if not miner_process:
+        return
+    
+    try:
+        # خواندن خروجی خطا به صورت غیرهمزمان
+        while miner_process and miner_process.poll() is None:
+            # استفاده از asyncio.to_thread برای خواندن non-blocking
+            line = await asyncio.to_thread(miner_process.stderr.readline)
+            if line:
+                line = line.strip()
+                print(f"[XMRig] {line}")
+                # تشخیص خطاهای مهم
+                if "error" in line.lower() or "failed" in line.lower() or "cannot" in line.lower():
+                    miner_status["error"] = line
+                    print(f"⚠️ خطا در ماینر: {line}")
+            await asyncio.sleep(0.1)
+        
+        # اگر ماینر به طور غیرمنتظره تمام شد
+        if miner_process and miner_process.poll() is not None:
+            exit_code = miner_process.poll()
+            print(f"⚠️ ماینر با کد {exit_code} متوقف شد")
+            miner_status["running"] = False
+            if exit_code != 0:
+                miner_status["error"] = f"Exit code: {exit_code}"
+            
+    except Exception as e:
+        print(f"⚠️ خطا در مانیتورینگ ماینر: {e}")
 
 def stop_miner():
     global miner_process, miner_status
@@ -113,6 +169,9 @@ def stop_miner():
 # ─── دریافت آمار از ماینر ────────────────────────────────────────────────────
 async def fetch_stats():
     global miner_status
+    if not miner_status["running"]:
+        return
+        
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get("http://localhost:8080/api/summary")
@@ -122,18 +181,25 @@ async def fetch_stats():
                 miner_status["shares"] = data.get("results", {}).get("shares_good", 0)
                 miner_status["uptime"] = int(time.time() - miner_status.get("start_time", time.time()))
                 miner_status["last_update"] = time.time()
+                miner_status["error"] = None
+                print(f"📊 هش‌ریت: {miner_status['hashrate']/1e6:.2f} MH/s | شار: {miner_status['shares']}")
+            else:
+                print(f"⚠️ API پاسخ ناموفق: {resp.status_code}")
+    except httpx.ConnectError:
+        print("⚠️ اتصال به API ماینر برقرار نیست (ماینر در حال راه‌اندازی است...)")
     except Exception as e:
         print(f"⚠️ خطا در دریافت آمار: {e}")
 
 # ─── تایمر پس‌زمینه ──────────────────────────────────────────────────────────
 async def periodic_fetch():
     while True:
-        if miner_status["running"]:
-            await fetch_stats()
+        await fetch_stats()
         await asyncio.sleep(10)
 
 @app.on_event("startup")
 async def startup():
+    # نادیده گرفتن سیگنال SIGTERM برای جلوگیری از کرش ناگهانی
+    signal.signal(signal.SIGTERM, lambda sig, frame: None)
     asyncio.create_task(periodic_fetch())
     print("🚀 داشبورد ماینینگ راه‌اندازی شد")
 
@@ -144,7 +210,6 @@ async def shutdown():
 # ─── API endpointها ──────────────────────────────────────────────────────────
 @app.post("/api/start-mining")
 async def start_mining(config: WalletConfig):
-    # حذف شرط ۵۰ کاراکتری و فقط چک کردن خالی نبودن
     if not config.wallet or len(config.wallet.strip()) < 5:
         raise HTTPException(status_code=400, detail="لطفاً آدرس کیف پول خود را وارد کنید")
     
@@ -198,6 +263,7 @@ HTML_PAGE = """
         .dot-green{background:#4caf50}
         .dot-red{background:#f44336}
         .dot-yellow{background:#ffeb3b}
+        .error-msg{background:#7a2a2a;border:1px solid #a33a3a;border-radius:8px;padding:8px 12px;margin-top:8px;color:#ff6b6b;font-size:13px;display:none}
     </style>
 </head>
 <body>
@@ -212,6 +278,7 @@ HTML_PAGE = """
             <button class="btn-stop" onclick="stopMining()">⏹️ توقف</button>
         </div>
         <div id="statusMsg" style="margin-top:8px;font-size:13px;color:#80cbc4"></div>
+        <div id="errorMsg" class="error-msg"></div>
     </div>
 
     <div class="grid" id="cards">
@@ -234,12 +301,12 @@ let historyData = [];
 
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
-    // اصلاح شرط: به جای ۵۰، فقط ۵ کاراکتر چک می‌شود
     if (!wallet || wallet.length < 5) {
         alert('لطفاً آدرس کیف پول خود را وارد کنید');
         return;
     }
     document.getElementById('statusMsg').innerHTML = '🔄 در حال راه‌اندازی ماینر...';
+    document.getElementById('errorMsg').style.display = 'none';
     try {
         const res = await fetch('/api/start-mining', {
             method: 'POST',
@@ -251,6 +318,10 @@ async function startMining() {
             document.getElementById('statusMsg').innerHTML = '✅ ' + data.message;
         } else {
             document.getElementById('statusMsg').innerHTML = '❌ خطا: ' + data.detail;
+            if (data.detail) {
+                document.getElementById('errorMsg').textContent = '❌ ' + data.detail;
+                document.getElementById('errorMsg').style.display = 'block';
+            }
         }
     } catch(e) {
         document.getElementById('statusMsg').innerHTML = '❌ خطا در ارتباط با سرور';
@@ -279,14 +350,25 @@ async function fetchStatus() {
         document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
         document.getElementById('walletDisplay').textContent = data.wallet ? data.wallet.slice(0,12)+'...' : '--';
         document.getElementById('lastUpdate').textContent = data.last_update ? new Date(data.last_update*1000).toLocaleTimeString('fa-IR') : '--';
+        
         const statusText = document.getElementById('statusText');
         if (data.running) {
             statusText.innerHTML = '<span class="status-dot dot-green"></span> فعال';
         } else {
             statusText.innerHTML = '<span class="status-dot dot-red"></span> غیرفعال';
         }
+        
+        // نمایش خطا اگر وجود دارد
+        if (data.error) {
+            document.getElementById('errorMsg').textContent = '⚠️ ' + data.error;
+            document.getElementById('errorMsg').style.display = 'block';
+        } else {
+            document.getElementById('errorMsg').style.display = 'none';
+        }
+        
         document.getElementById('poolStatus').textContent = data.running ? 'متصل' : 'قطع';
         document.getElementById('poolName').textContent = data.running ? 'pool.supportxmr.com' : '--';
+        
         if (data.running && data.hashrate > 0) {
             historyData.push({time: new Date(), hashrate: data.hashrate});
             if (historyData.length > 100) historyData.shift();
@@ -352,7 +434,7 @@ async def dashboard():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "miner_running": miner_status["running"]}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
