@@ -17,6 +17,12 @@
             "nicehash": false
         }
     ],
+    "api": {
+        "id": "railway-miner",
+        "worker-id": "main",
+        "port": 8080,
+        "access-token": null
+    },
     "donate-level": 1,
     "opencl": false,
     "cuda": false,
