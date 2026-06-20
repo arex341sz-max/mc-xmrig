@@ -5,6 +5,7 @@ import time
 import asyncio
 import httpx
 import signal
+import psutil  # ← کتابخانه جدید برای گرفتن رم
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -39,25 +40,37 @@ miner_status = {
     "pool": "",
     "error": None,
     "connected": False,
+    "memory_mb": 0,  # ← مقدار رم مصرفی ماینر
 }
 history = []
 
+def get_miner_memory():
+    """دریافت مصرف رم فرآیند ماینر (بر حسب مگابایت)"""
+    global miner_process
+    if not miner_process or miner_process.poll() is not None:
+        return 0
+    try:
+        p = psutil.Process(miner_process.pid)
+        mem_mb = p.memory_info().rss / (1024 * 1024)
+        return round(mem_mb, 1)
+    except:
+        return 0
+
 def generate_config(wallet_address: str) -> str:
-    """تنظیمات با مصرف رم زیر ۵۱۲ مگابایت"""
     template = {
         "autosave": False,
         "cpu": {
             "enabled": True,
-            "huge-pages": False,          # غیرفعال برای کاهش رم
+            "huge-pages": False,
             "hw-aes": True,
-            "max-threads-hint": 0.5,       # فقط نیم هسته
+            "max-threads-hint": 0.5,
             "asm": True,
             "priority": 5,
-            "mode": "light"                # حالت سبک RandomX (256MB)
+            "mode": "light"
         },
         "pools": [
             {
-                "url": "gulf.moneroocean.stream:10128",  # استخر MoneroOcean
+                "url": "gulf.moneroocean.stream:10128",
                 "user": wallet_address,
                 "pass": "railway_worker",
                 "tls": True,
@@ -127,6 +140,7 @@ def start_miner(wallet: str):
         miner_status["hashrate"] = 0
         miner_status["shares_good"] = 0
         miner_status["connected"] = False
+        miner_status["memory_mb"] = 0
         
         print(f"✅ ماینر با کیف پول {wallet[:8]}... راه‌اندازی شد (PID: {miner_process.pid})")
         
@@ -204,6 +218,9 @@ async def fetch_stats():
     
     if not miner_status["running"]:
         return
+    
+    # دریافت مصرف رم ماینر
+    miner_status["memory_mb"] = get_miner_memory()
         
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -230,7 +247,7 @@ async def fetch_stats():
                         if len(history) > 100:
                             history = history[-100:]
                         
-                        print(f"📊 هش: {hashrate/1e3:.0f} H/s | شار خوب: {miner_status['shares_good']}")
+                        print(f"📊 هش: {hashrate/1e3:.0f} H/s | شار خوب: {miner_status['shares_good']} | رم: {miner_status['memory_mb']} MB")
                         return
                 except:
                     continue
@@ -291,10 +308,11 @@ async def health():
         "status": "ok",
         "miner_running": miner_status["running"],
         "connected": miner_status["connected"],
-        "uptime": miner_status["uptime"]
+        "uptime": miner_status["uptime"],
+        "memory_mb": miner_status["memory_mb"]
     }
 
-# ─── صفحه HTML (ساده و سریع) ─────────────────────────────────────────────────
+# ─── صفحه HTML (با کارت رم جدید) ────────────────────────────────────────────
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -316,10 +334,12 @@ HTML_PAGE = """
         .btn-start { background: #1b8a3b; color: #fff; }
         .btn-stop { background: #b71c1c; color: #fff; }
         .btn-refresh { background: rgba(79,195,247,0.12); color: #4fc3f7; border: 1px solid rgba(79,195,247,0.15); }
-        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
         .metric { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 12px 14px; }
         .metric-label { font-size: 10px; color: #6a7fa0; }
         .metric-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+        .metric-value .unit { font-size: 12px; font-weight: 400; color: #6a7fa0; margin-right: 2px; }
+        .metric-sub { font-size: 10px; color: #6a7fa0; margin-top: 2px; }
         .chart-container { background: #12182b; border: 1px solid #1e2a45; border-radius: 10px; padding: 14px; margin-top: 10px; }
         .chart-container canvas { width: 100% !important; height: 220px !important; }
         .error-box { background: rgba(239,83,80,0.08); border: 1px solid rgba(239,83,80,0.2); border-radius: 6px; padding: 8px 12px; margin-top: 8px; color: #ef5350; display: none; font-size: 13px; }
@@ -354,16 +374,19 @@ HTML_PAGE = """
         <div class="error-box" id="errorBox"><span id="errorText"></span></div>
     </div>
     <div class="metrics">
-        <div class="metric"><div class="metric-label">هش‌ریت</div><div class="metric-value" id="hashrate">--</div></div>
-        <div class="metric"><div class="metric-label">شار خوب</div><div class="metric-value" id="sharesGood">--</div></div>
-        <div class="metric"><div class="metric-label">آپتایم</div><div class="metric-value" id="uptime">--</div></div>
-        <div class="metric"><div class="metric-label">اتصال</div><div class="metric-value" id="poolStatus">--</div></div>
+        <div class="metric"><div class="metric-label">⚡ هش‌ریت</div><div class="metric-value" id="hashrate">--</div></div>
+        <div class="metric"><div class="metric-label">✅ شار خوب</div><div class="metric-value" id="sharesGood">--</div></div>
+        <div class="metric"><div class="metric-label">🕒 آپتایم</div><div class="metric-value" id="uptime">--</div></div>
+        <div class="metric"><div class="metric-label">🔗 اتصال</div><div class="metric-value" id="poolStatus">--</div></div>
+        <div class="metric"><div class="metric-label">🧠 مصرف رم</div><div class="metric-value" id="memoryUsage">-- <span class="unit">MB</span></div><div class="metric-sub">حداکثر: <span id="memoryMax">--</span></div></div>
     </div>
     <div class="chart-container"><canvas id="chart"></canvas></div>
-    <div class="footer">⚡ رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
+    <div class="footer">⚡ حالت light · رم &lt; 512MB · <a href="https://t.me/CodeBoxo" target="_blank">@CodeBoxo</a></div>
 </div>
 <script>
 let chartInstance = null, historyData = [];
+let maxMemory = 0;
+
 async function startMining() {
     const wallet = document.getElementById('walletInput').value.trim();
     if (!wallet || wallet.length < 5) { alert('آدرس را وارد کنید'); return; }
@@ -394,6 +417,15 @@ function updateUI(data) {
     document.getElementById('sharesGood').textContent = data.shares_good || 0;
     document.getElementById('uptime').textContent = data.running ? formatUptime(data.uptime) : '--';
     document.getElementById('poolStatus').textContent = data.connected ? '🟢 متصل' : '🔴 قطع';
+    
+    // نمایش مصرف رم
+    const mem = data.memory_mb || 0;
+    document.getElementById('memoryUsage').innerHTML = mem.toFixed(1) + ' <span class="unit">MB</span>';
+    if (mem > maxMemory) {
+        maxMemory = mem;
+        document.getElementById('memoryMax').textContent = maxMemory.toFixed(1) + ' MB';
+    }
+    
     const badge = document.getElementById('statusBadge'), dot = document.getElementById('statusDot'), text = document.getElementById('statusText');
     if (data.running && data.connected) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '⛏️ فعال'; }
     else if (data.running) { badge.className = 'status-badge online'; dot.className = 'dot online'; text.textContent = '🔄 اتصال...'; }
